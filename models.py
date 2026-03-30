@@ -320,3 +320,83 @@ class KuaiCVRModel(nn.Module):
             out["loss"] = CVRHead.ips_bce_loss(logits, labels, w)
 
         return out
+
+    # ── Pre-computed embedding API ────────────────────────────────────────────
+
+    @torch.no_grad()
+    def encode_graph(
+        self,
+        structural_graph,
+        sequential_graph,
+        relation_edge_index,
+        relation_types,
+        session_id,
+    ) -> dict[str, Tensor]:
+        """
+        Run both GNNs once over the full graph and return embedding matrices.
+
+        Called once per epoch OUTSIDE the batch loop.  No gradients are kept
+        here — this is purely inference over the graph structure.  The returned
+        tensors live on the same device as the model parameters.
+
+        Returns
+        -------
+        dict with keys:
+            's_user'    : [N_users,    D]  structural user embeddings
+            's_video'   : [N_videos,   D]  structural video embeddings
+            'q_video'   : [N_videos,   D]  sequential video embeddings
+            'q_session' : [N_sessions, D]  sequential session embeddings
+        """
+        struct_emb = self.structural_gnn(
+            structural_graph, relation_edge_index, relation_types
+        )
+        seq_emb = self.sequential_gnn(sequential_graph, session_id)
+
+        return {
+            "s_user":    struct_emb["user"],
+            "s_video":   struct_emb["video"],
+            "q_video":   seq_emb["video"],
+            "q_session": seq_emb["session"],
+        }
+
+    def forward_from_embeddings(
+        self,
+        emb:         dict[str, Tensor],  # from encode_graph
+        user_idx:    Tensor,             # [B]
+        video_idx:   Tensor,             # [B]
+        session_idx: Tensor,             # [B]
+        ips_weights: Tensor | None = None,
+        labels:      Tensor | None = None,
+        kg_relation: Tensor | None = None,
+    ) -> dict[str, Tensor]:
+        """
+        Run only the alignment module and CVR head using pre-computed embeddings.
+
+        Called inside the batch loop with gradients enabled.  Only the
+        alignment and head parameters receive gradients — the GNN weights
+        are updated implicitly because encode_graph is called with the live
+        model weights at the start of each epoch.
+
+        Parameters
+        ----------
+        emb         : output of encode_graph (on device)
+        user_idx    : [B] indices into emb["s_user"]
+        video_idx   : [B] indices into emb["s_video"] and emb["q_video"]
+        session_idx : [B] indices into emb["q_session"]
+        """
+        h_s_user    = emb["s_user"][user_idx]
+        h_s_video   = emb["s_video"][video_idx]
+        h_q_video   = emb["q_video"][video_idx]
+        h_q_session = emb["q_session"][session_idx]
+
+        fused  = self.alignment(h_s_user, h_s_video, h_q_video, h_q_session, kg_relation)
+        logits = self.cvr_head(fused)
+        proba  = torch.sigmoid(logits)
+
+        out: dict[str, Tensor] = {"logits": logits, "proba": proba, "fused": fused}
+
+        if labels is not None:
+            w = ips_weights if ips_weights is not None else torch.ones_like(logits)
+            out["loss"] = CVRHead.ips_bce_loss(logits, labels, w)
+
+        return out

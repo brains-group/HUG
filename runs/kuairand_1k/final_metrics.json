@@ -1,0 +1,44 @@
+{
+  "train": {
+    "split": "train",
+    "loss": 0.558140395974021,
+    "auc": 0.762826593649669,
+    "ap": 0.6543229626543849,
+    "logloss": 0.5581399752457111,
+    "ndcg10": 1.0,
+    "n_samples": 9356988,
+    "n_pos": 3546918
+  },
+  "test": {
+    "split": "test ",
+    "loss": 0.576005974875114,
+    "auc": 0.7344264400252511,
+    "ap": 0.6113632758052712,
+    "logloss": 0.5760041323219346,
+    "ndcg10": 0.9515320508544696,
+    "n_samples": 2339248,
+    "n_pos": 867585
+  },
+  "args": {
+    "data_dir": "KuaiRand-1K/data",
+    "cache_dir": "./cache/1K",
+    "output_dir": "./runs",
+    "scale": "1k",
+    "device": "cuda:0",
+    "no_amp": false,
+    "eval_only": false,
+    "rebuild_hkg": false,
+    "seed": 42,
+    "min_interactions": 10,
+    "test_ratio": 0.2,
+    "max_seq_len": 50,
+    "hidden_dim": 128,
+    "out_dim": 64,
+    "epochs": 20,
+    "batch_size": 2048,
+    "lr": 0.001,
+    "weight_decay": 1e-05,
+    "max_edges": 100000
+  },
+  "best_auc": 0.7344264091533652
+}

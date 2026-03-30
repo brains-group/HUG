@@ -140,11 +140,14 @@ class StructuralGNN(nn.Module):
         -------
         dict with keys 'user' and 'video', each a Tensor of shape [N, out_dim].
         """
-        # Project each node type to shared hidden space
-        h_user     = self._encode_user(graph["user"].x, graph["user"].onehot)
-        h_video    = F.relu(self.video_proj(graph["video"].x))
-        h_author   = F.relu(self.author_proj(graph["author"].x))
-        h_category = F.relu(self.category_proj(graph["category"].x))
+        # Infer device from model parameters and move graph tensors there
+        dev = next(self.parameters()).device
+        h_user     = self._encode_user(
+            graph["user"].x.to(dev), graph["user"].onehot.to(dev)
+        )
+        h_video    = F.relu(self.video_proj(graph["video"].x.to(dev)))
+        h_author   = F.relu(self.author_proj(graph["author"].x.to(dev)))
+        h_category = F.relu(self.category_proj(graph["category"].x.to(dev)))
 
         # Concatenate all node embeddings into one big tensor
         # Order: [user | video | author | category]
@@ -251,8 +254,9 @@ class SequentialGNN(nn.Module):
             'video'   : item-level embeddings [N_video, out_dim]
             'session' : session-level embeddings [N_session, out_dim]
         """
-        edge_index = graph["video", "next_in_session", "video"].edge_index
-        x = graph["video"].x
+        dev = next(self.parameters()).device
+        edge_index = graph["video", "next_in_session", "video"].edge_index.to(dev)
+        x = graph["video"].x.to(dev)
 
         # Project to hidden dim
         h = F.relu(self.input_proj(x))
@@ -277,37 +281,49 @@ class SequentialGNN(nn.Module):
         session_id: Tensor,       # [E]
         n_sessions: int,
     ) -> Tensor:
-        """Aggregate per-session embeddings with soft attention + recency gate."""
-        hidden_dim = h.shape[1]
-        session_emb = torch.zeros(n_sessions, hidden_dim, device=h.device)
-        counts      = torch.zeros(n_sessions, device=h.device)
+        """Aggregate per-session embeddings with soft attention + recency gate.
 
-        # For each session, gather the embedding of the last item (recency anchor)
-        last_item = torch.zeros(n_sessions, hidden_dim, device=h.device)
+        Accumulates results into Python lists and stacks at the end to avoid
+        in-place index assignments (e.g. tensor[i] = ...) which corrupt the
+        autograd graph and cause RuntimeError during backward.
+        """
+        hidden_dim  = h.shape[1]
+        zeros       = h.new_zeros(hidden_dim)   # reusable zero vector on same device/dtype
+
+        session_emb_list: list[Tensor] = []
+        last_item_list:   list[Tensor] = []
+
         for sid in range(n_sessions):
             mask = session_id == sid
             if mask.sum() == 0:
+                # Session has no edges — use zero vectors (no grad needed here)
+                session_emb_list.append(zeros)
+                last_item_list.append(zeros)
                 continue
-            # Source nodes in this session (edges: src → tgt)
+
             src_nodes = edge_index[0][mask]
             tgt_nodes = edge_index[1][mask]
             all_nodes = torch.unique(torch.cat([src_nodes, tgt_nodes]))
-            node_h    = h[all_nodes]  # [n_in_session, hidden]
+            node_h    = h[all_nodes]             # [n_in_session, hidden_dim]
 
-            # Last item = highest index target node in temporal order
-            last_item[sid] = h[tgt_nodes[-1]]
+            # Last item in temporal order = last target node
+            last_h = h[tgt_nodes[-1]]            # [hidden_dim]
+            last_item_list.append(last_h)
 
-            # Attention: query = last item, keys = all items in session
-            q   = self.attn_q(last_item[sid].unsqueeze(0))        # [1, H]
-            k   = self.attn_k(node_h)                              # [n, H]
-            score = self.attn_v(torch.tanh(q + k)).squeeze(-1)    # [n]
-            alpha = torch.softmax(score, dim=0)                    # [n]
-            session_emb[sid] = (alpha.unsqueeze(-1) * node_h).sum(0)
-            counts[sid] = 1.0
+            # Soft attention: query = last item, keys = all session items
+            q     = self.attn_q(last_h.unsqueeze(0))          # [1, H]
+            k     = self.attn_k(node_h)                        # [n, H]
+            score = self.attn_v(torch.tanh(q + k)).squeeze(-1) # [n]
+            alpha = torch.softmax(score, dim=0)                 # [n]
+            session_emb_list.append((alpha.unsqueeze(-1) * node_h).sum(0))
 
-        # Recency gate: blend attention readout with last item embedding
-        gate_input  = torch.cat([session_emb, last_item], dim=-1)
-        session_emb = torch.sigmoid(self.recency_gate(gate_input)) * session_emb \
-                    + (1 - torch.sigmoid(self.recency_gate(gate_input))) * last_item
+        # Stack into [n_sessions, hidden_dim] — no in-place writes, grad flows cleanly
+        session_emb = torch.stack(session_emb_list, dim=0)   # [n_sessions, hidden_dim]
+        last_item   = torch.stack(last_item_list,   dim=0)   # [n_sessions, hidden_dim]
+
+        # Recency gate: blend attention readout with last-item embedding
+        # Compute gate once to avoid calling recency_gate twice on the same input
+        gate        = torch.sigmoid(self.recency_gate(torch.cat([session_emb, last_item], dim=-1)))
+        session_emb = gate * session_emb + (1.0 - gate) * last_item
 
         return session_emb

@@ -1,0 +1,28 @@
+name: hkg-env
+
+channels:
+  - pytorch
+  - pyg
+  - nvidia
+  - conda-forge
+  - defaults
+
+dependencies:
+  - python=3.10
+
+  - numpy
+  - pandas
+
+  - pytorch
+  - torchvision
+  - torchaudio
+  - pytorch-cuda=12.1
+
+  - torch-geometric
+
+  - pytest
+  - pip
+
+  - tqdm
+  - matplotlib
+  - scikit-learn

@@ -711,3 +711,308 @@ class TestPipelineIntegration:
         x_struct = hkg_bundle.structural_graph["video"].x
         x_seq    = hkg_bundle.sequential_graph["video"].x
         assert torch.allclose(x_struct, x_seq)
+
+
+# ── TestRealData ───────────────────────────────────────────────────────────────
+
+class TestRealData:
+    """
+    End-to-end tests that run against the real KuaiRand-1K files.
+
+    All tests in this class are skipped automatically when --data-dir is not
+    supplied on the pytest command line.
+
+    Run with:
+        pytest tests.py -v --data-dir /path/to/KuaiRand-1K/data
+
+    Tests are grouped into three phases:
+        Phase 1 — Data loading      : scale, schema, and value-range checks
+        Phase 2 — HKG construction  : graph structure and connectivity checks
+        Phase 3 — Model forward pass: a full training step on real embeddings
+    """
+
+    # ── Shared fixtures (session-scoped so files are read once) ────────────────
+
+    @pytest.fixture(scope="class")
+    def real_data(self, real_data_dir) -> KuaiRandData:
+        if real_data_dir is None:
+            pytest.skip("--data-dir not provided; skipping real-data tests")
+        loader = KuaiRandLoader(real_data_dir, min_interactions=10, filter_ads=True)
+        return loader.load()
+
+    @pytest.fixture(scope="class")
+    def real_bundle(self, real_data, device) -> HKGBundle:
+        constructor = HKGConstructor(real_data, device=str(device), max_seq_len=50)
+        return constructor.build()
+
+    # ── Phase 1: Data loading ──────────────────────────────────────────────────
+
+    def test_real_user_count(self, real_data):
+        """KuaiRand-1K has exactly 1,000 users before interaction filtering."""
+        # After min_interactions filter some users may be dropped, but the
+        # raw user_features table must have at most 1,000 rows.
+        assert 1 <= len(real_data.user_features) <= 1_000
+
+    def test_real_video_count(self, real_data):
+        """KuaiRand-1K has ~4.4M videos; after AD filtering still > 100K."""
+        assert len(real_data.video_basic) > 100_000, (
+            f"Expected >100K videos after AD filter, got {len(real_data.video_basic)}"
+        )
+
+    def test_real_interaction_count(self, real_data):
+        """Combined log should have millions of interactions."""
+        n = len(real_data.log_combined)
+        assert n > 1_000_000, f"Expected >1M combined interactions, got {n}"
+
+    def test_real_random_policy_present(self, real_data):
+        """Random-policy interactions (is_rand=1) must exist."""
+        rand_rows = (real_data.log_combined["is_rand"] == 1).sum()
+        assert rand_rows > 0, "No random-policy interactions found"
+
+    def test_real_is_click_binary(self, real_data):
+        """is_click must be 0 or 1 only."""
+        unique = set(real_data.log_combined["is_click"].unique())
+        assert unique <= {0, 1}, f"Unexpected is_click values: {unique}"
+
+    def test_real_play_ratio_bounds(self, real_data):
+        """play_ratio derived field must be in [0, 1]."""
+        pr = real_data.log_combined["play_ratio"]
+        assert pr.min() >= 0.0, f"play_ratio min = {pr.min()}"
+        assert pr.max() <= 1.0, f"play_ratio max = {pr.max()}"
+
+    def test_real_global_cvr_bounds(self, real_data):
+        """Global CVR per video must be in [0, 1]."""
+        cvr = real_data.video_statistic["global_cvr"]
+        assert cvr.min() >= 0.0
+        assert cvr.max() <= 1.0
+
+    def test_real_sessions_derived(self, real_data):
+        """Session map must exist and cover all interactions."""
+        sm = real_data.session_map
+        assert len(sm) == len(real_data.log_combined), (
+            "session_map row count does not match log_combined"
+        )
+        assert sm["session_id"].nunique() > 1_000, (
+            f"Expected >1K sessions, got {sm['session_id'].nunique()}"
+        )
+
+    def test_real_id_maps_contiguous(self, real_data):
+        """Re-indexed IDs must be contiguous from 0."""
+        uid_vals = sorted(real_data.user_id_map.values())
+        assert uid_vals == list(range(len(uid_vals))), "user_id_map not contiguous"
+        vid_vals = sorted(real_data.video_id_map.values())
+        assert vid_vals == list(range(len(vid_vals))), "video_id_map not contiguous"
+
+    def test_real_no_null_user_ids_in_log(self, real_data):
+        assert real_data.log_combined["user_id"].isna().sum() == 0
+
+    def test_real_no_null_video_ids_in_log(self, real_data):
+        assert real_data.log_combined["video_id"].isna().sum() == 0
+
+    def test_real_tag_lists_populated(self, real_data):
+        """At least half the videos should have at least one category tag."""
+        has_tag = real_data.video_basic["tag_list"].apply(lambda x: len(x) > 0)
+        frac    = has_tag.mean()
+        assert frac > 0.5, f"Only {frac:.1%} of videos have tags — check tag parsing"
+
+    def test_real_onehot_columns_present(self, real_data):
+        """All 18 encrypted user features must be in the user_features table."""
+        for i in range(18):
+            assert f"onehot_feat{i}" in real_data.user_features.columns, (
+                f"Missing onehot_feat{i}"
+            )
+
+    # ── Phase 2: HKG construction ──────────────────────────────────────────────
+
+    def test_real_hkg_node_types(self, real_bundle):
+        for nt in ["user", "video", "author", "category", "session"]:
+            assert nt in real_bundle.full_graph.node_types, f"Missing node type: {nt}"
+
+    def test_real_hkg_edge_types(self, real_bundle):
+        g = real_bundle.full_graph
+        for et in [
+            ("user", "interacted",  "video"),
+            ("user", "clicked",     "video"),
+            ("video", "tagged_as",  "category"),
+            ("video", "made_by",    "author"),
+            ("video", "next_in_session", "video"),
+        ]:
+            assert et in g.edge_types, f"Missing edge type: {et}"
+
+    def test_real_hkg_user_count(self, real_bundle, real_data):
+        assert real_bundle.n_users == len(real_data.user_id_map)
+
+    def test_real_hkg_video_count(self, real_bundle, real_data):
+        assert real_bundle.n_videos == len(real_data.video_id_map)
+
+    def test_real_hkg_has_sessions(self, real_bundle):
+        assert real_bundle.n_sessions > 1_000, (
+            f"Expected >1K sessions, got {real_bundle.n_sessions}"
+        )
+
+    def test_real_hkg_clicked_edges_subset_of_interacted(self, real_bundle):
+        """Clicked edge count must be <= total interacted edge count."""
+        g = real_bundle.full_graph
+        n_interacted = g["user", "interacted", "video"].edge_index.shape[1]
+        n_clicked    = g["user", "clicked",    "video"].edge_index.shape[1]
+        assert n_clicked <= n_interacted, (
+            f"clicked ({n_clicked}) > interacted ({n_interacted}) — impossible"
+        )
+
+    def test_real_hkg_ips_weights_present(self, real_bundle):
+        et = ("user", "interacted", "video")
+        g  = real_bundle.full_graph
+        assert hasattr(g[et], "is_rand"), "is_rand flag missing on interaction edges"
+
+    def test_real_hkg_video_features_finite(self, real_bundle):
+        x = real_bundle.full_graph["video"].x
+        assert torch.isfinite(x).all(), "Non-finite values in video node features"
+
+    def test_real_hkg_user_features_finite(self, real_bundle):
+        x = real_bundle.full_graph["user"].x
+        assert torch.isfinite(x).all(), "Non-finite values in user node features"
+
+    def test_real_structural_excludes_session(self, real_bundle):
+        assert "session" not in real_bundle.structural_graph.node_types
+
+    def test_real_sequential_excludes_user(self, real_bundle):
+        assert "user" not in real_bundle.sequential_graph.node_types
+
+    def test_real_video_features_shared_across_subgraphs(self, real_bundle):
+        x_struct = real_bundle.structural_graph["video"].x
+        x_seq    = real_bundle.sequential_graph["video"].x
+        assert torch.allclose(x_struct, x_seq), (
+            "Video features differ between structural and sequential subgraphs"
+        )
+
+    def test_real_seq_edge_index_in_bounds(self, real_bundle):
+        """next_in_session edge indices must not exceed video node count."""
+        ei      = real_bundle.sequential_graph["video", "next_in_session", "video"].edge_index
+        n_video = real_bundle.sequential_graph["video"].num_nodes
+        assert ei.max() < n_video, (
+            f"Sequential edge index {ei.max()} >= n_video {n_video}"
+        )
+
+    # ── Phase 3: Model forward + backward on real embeddings ──────────────────
+
+    def test_real_model_forward_backward(self, real_bundle, real_data, device):
+        """One forward + backward step using real graph dimensions and the target device."""
+        sg = real_bundle.structural_graph
+        qg = real_bundle.sequential_graph
+
+        user_cont_cols = [
+            c for c in real_data.user_features.columns
+            if c.endswith("_log") or c in (
+                "activity_level", "is_lowactive_period",
+                "is_live_streamer", "is_video_author",
+            )
+        ]
+        user_cont_dim  = len(user_cont_cols)
+        video_feat_dim = sg["video"].x.shape[1]
+        D = 32
+
+        # Infer actual onehot vocab sizes from real data — do NOT hardcode.
+        # Each onehot_featN column may have a different max value in the real dataset.
+        onehot_cols   = [f"onehot_feat{i}" for i in range(18)
+                         if f"onehot_feat{i}" in real_data.user_features.columns]
+        onehot_vocabs = [
+            int(real_data.user_features[col].max()) + 1
+            for col in onehot_cols
+        ]
+
+        struct = StructuralGNN(
+            user_cont_dim     = user_cont_dim,
+            user_onehot_vocab = onehot_vocabs,
+            video_feat_dim    = video_feat_dim,
+            author_feat_dim   = 1,
+            category_feat_dim = 1,
+            hidden_dim        = 64,
+            out_dim           = D,
+            num_relations     = 7,
+            num_layers        = 2,
+        )
+        seq = SequentialGNN(
+            video_feat_dim = video_feat_dim,
+            hidden_dim     = 64,
+            out_dim        = D,
+            num_layers     = 2,
+        )
+        align = AlignmentModule(emb_dim=D, kg_relation_dim=0, num_heads=4)
+        head  = CVRHead(fused_dim=D, hidden_dims=[64, 32])
+        model = KuaiCVRModel(struct, seq, align, head).to(device)
+        model.train()
+
+        optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+
+        # Build merged relation edge index for R-GCN, moved to device
+        n_user   = sg["user"].num_nodes
+        n_video  = sg["video"].num_nodes
+        offsets  = {"user": 0, "video": n_user, "author": n_user + n_video}
+
+        rel_parts, rel_type_parts = [], []
+        rel_map = {
+            ("user",  "clicked",    "video"): 0,
+            ("user",  "liked",      "video"): 1,
+            ("user",  "hated",      "video"): 2,
+            ("user",  "commented",  "video"): 3,
+            ("user",  "forwarded",  "video"): 4,
+            ("video", "made_by",    "author"): 5,
+            ("video", "tagged_as",  "category"): 6,
+        }
+        for et, rel_id in rel_map.items():
+            if et not in sg.edge_types:
+                continue
+            ei      = sg[et].edge_index.cpu()   # start on CPU for indexing
+            shifted = ei.clone()
+            shifted[0] += offsets.get(et[0], 0)
+            shifted[1] += offsets.get(et[2], n_user + n_video)
+            if shifted.shape[1] > 2000:
+                idx     = torch.randperm(shifted.shape[1])[:2000]
+                shifted = shifted[:, idx]
+            rel_parts.append(shifted)
+            rel_type_parts.append(torch.full((shifted.shape[1],), rel_id, dtype=torch.long))
+
+        if rel_parts:
+            rel_ei = torch.cat(rel_parts,      dim=1).to(device)
+            rel_t  = torch.cat(rel_type_parts, dim=0).to(device)
+        else:
+            rel_ei = torch.zeros(2, 0, dtype=torch.long, device=device)
+            rel_t  = torch.zeros(0, dtype=torch.long, device=device)
+
+        # Real sequential edges — already on device from HKGConstructor
+        seq_et  = ("video", "next_in_session", "video")
+        sess_id = qg[seq_et].session_id.to(device)
+        n_sess  = max(real_bundle.n_sessions, 1)
+
+        B = 16
+        out = model(
+            structural_graph    = sg,
+            sequential_graph    = qg,
+            relation_edge_index = rel_ei,
+            relation_types      = rel_t,
+            session_id          = sess_id,
+            user_idx            = torch.randint(0, real_bundle.n_users,  (B,), device=device),
+            video_idx           = torch.randint(0, real_bundle.n_videos, (B,), device=device),
+            session_idx         = torch.randint(0, n_sess, (B,), device=device),
+            kg_relation         = None,
+            ips_weights         = torch.ones(B, device=device),
+            labels              = torch.randint(0, 2, (B,), device=device),
+        )
+
+        optimizer.zero_grad()
+        out["loss"].backward()
+        optimizer.step()
+
+        assert torch.isfinite(out["loss"]), f"Loss is not finite: {out['loss']}"
+        assert out["proba"].shape == (B,)
+        assert out["proba"].min() >= 0.0 and out["proba"].max() <= 1.0
+
+        grad_norms = [
+            p.grad.norm().item()
+            for p in model.parameters()
+            if p.requires_grad and p.grad is not None
+        ]
+        assert len(grad_norms) > 0, "No gradients computed"
+        assert all(torch.isfinite(torch.tensor(g)) for g in grad_norms), (
+            "Non-finite gradients found"
+        )
