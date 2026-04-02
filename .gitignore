@@ -211,3 +211,6 @@ __marimo__/
 KuaiRand-1K/
 results.txt
 cache/
+FuxiCTR/
+checkpoints/
+Baselines/data
