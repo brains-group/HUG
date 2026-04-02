@@ -273,6 +273,39 @@ class KuaiCVRModel(nn.Module):
         self.alignment      = alignment
         self.cvr_head       = cvr_head
 
+    def split_across_gpus(
+        self,
+        gpu_structural: int = 0,
+        gpu_sequential: int = 1,
+        gpu_head:       int = 0,
+    ) -> "KuaiCVRModel":
+        """
+        Place different components on different GPUs.
+
+        StructuralGNN  → gpu_structural  (R-GCN over large node set)
+        SequentialGNN  → gpu_sequential  (GGNN over session graph)
+        AlignmentModule + CVRHead → gpu_head (lightweight, runs per batch)
+
+        The encode step runs both GNNs in parallel on their respective GPUs.
+        The batch loop runs alignment + head on gpu_head using small [B, D]
+        slices that are transferred from CPU pinned memory.
+
+        Returns self for chaining: model.split_across_gpus().
+        """
+        self.structural_gnn = self.structural_gnn.to(f"cuda:{gpu_structural}")
+        self.sequential_gnn = self.sequential_gnn.to(f"cuda:{gpu_sequential}")
+        self.alignment      = self.alignment.to(f"cuda:{gpu_head}")
+        self.cvr_head       = self.cvr_head.to(f"cuda:{gpu_head}")
+        self._gpu_structural = gpu_structural
+        self._gpu_sequential = gpu_sequential
+        self._gpu_head       = gpu_head
+        return self
+
+    @property
+    def head_device(self) -> torch.device:
+        """Device where alignment + CVR head live."""
+        return next(self.alignment.parameters()).device
+
     def forward(
         self,
         structural_graph,          # HeteroData — structural subgraph
@@ -390,6 +423,92 @@ class KuaiCVRModel(nn.Module):
         h_q_session = emb["q_session"][session_idx]
 
         fused  = self.alignment(h_s_user, h_s_video, h_q_video, h_q_session, kg_relation)
+        logits = self.cvr_head(fused)
+        proba  = torch.sigmoid(logits)
+
+        out: dict[str, Tensor] = {"logits": logits, "proba": proba, "fused": fused}
+
+        if labels is not None:
+            w = ips_weights if ips_weights is not None else torch.ones_like(logits)
+            out["loss"] = CVRHead.ips_bce_loss(logits, labels, w)
+
+        return out
+
+
+# ── Single GNN Baseline Model ─────────────────────────────────────────────────
+
+class SingleGNNModel(nn.Module):
+    """
+    Baseline model: one HGT over the full HKG → concatenate user + video → CVRHead.
+
+    The alignment module is absent.  User and video embeddings from the single
+    HGT are concatenated into a [B, out_dim * 2] vector and passed directly
+    to the CVR head.  Session context enters through the HGT's own message
+    passing over next_in_session edges rather than through a dedicated GGNN.
+
+    This serves as the ablation baseline for the dual-GNN architecture.
+    A higher dual-GNN AUC demonstrates the value of:
+      - Separating structural and sequential signals into dedicated encoders
+      - The KG-guided cross-attention alignment module
+      - The soft-attention + recency-gate session readout in SR-GNN
+
+    Parameters
+    ----------
+    hgt        : SingleHGT
+    cvr_head   : CVRHead  (must have fused_dim = out_dim * 2)
+    """
+
+    def __init__(self, hgt, cvr_head: "CVRHead") -> None:
+        super().__init__()
+        self.hgt      = hgt
+        self.cvr_head = cvr_head
+
+    @property
+    def head_device(self) -> torch.device:
+        return next(self.cvr_head.parameters()).device
+
+    @torch.no_grad()
+    def encode_graph(
+        self,
+        full_graph,
+        merged_edge_index: Tensor,
+        merged_edge_types:  Tensor,
+        session_id:         Tensor,
+    ) -> dict[str, Tensor]:
+        """
+        Run the HGT once and return full embedding matrices.
+
+        Returns
+        -------
+        dict with keys:
+            'user'    : [N_users,    out_dim]
+            'video'   : [N_videos,   out_dim]
+            'session' : [N_sessions, out_dim]
+        """
+        return self.hgt(full_graph, merged_edge_index, merged_edge_types, session_id)
+
+    def forward_from_embeddings(
+        self,
+        emb:         dict[str, Tensor],
+        user_idx:    Tensor,
+        video_idx:   Tensor,
+        session_idx: Tensor,
+        ips_weights: Tensor | None = None,
+        labels:      Tensor | None = None,
+        kg_relation: Tensor | None = None,   # unused, kept for API symmetry
+    ) -> dict[str, Tensor]:
+        """
+        Gather batch embeddings and run the CVR head.
+
+        No alignment module — user and video embeddings are concatenated.
+        Session context is baked into the video embedding by the HGT
+        (next_in_session edges propagate session signal to video nodes).
+        """
+        h_user  = emb["user"][user_idx]           # [B, D]
+        h_video = emb["video"][video_idx]         # [B, D]
+
+        # Simple concatenation instead of cross-attention alignment
+        fused  = torch.cat([h_user, h_video], dim=-1)   # [B, D*2]
         logits = self.cvr_head(fused)
         proba  = torch.sigmoid(logits)
 
