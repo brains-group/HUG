@@ -1,0 +1,108 @@
+# config/model_config.yaml
+# ─────────────────────────────────────────────────────────────
+# FuxiCTR model configurations for DIN and BST on KuaiRand-1K.
+# Run with:
+#   cd model_zoo/DIN/DIN_torch
+#   python run_expid.py --expid DIN_kuairand_1k --gpu 0
+#
+#   cd model_zoo/BST/BST_torch
+#   python run_expid.py --expid BST_kuairand_1k --gpu 0
+# ─────────────────────────────────────────────────────────────
+
+Base:
+    model_root: ../../checkpoints/
+    workers: 4
+    verbose: 1                    # show tqdm progress bar
+    patience: 3                   # early-stop after 3 non-improving evals
+    pickle_feature_encoder: True
+    use_hdf5: True
+    save_best_only: True
+    every_x_epochs: 1
+    debug: False
+    partition_block_size: -1
+
+# ─────────────────────────────────────────────────────────────
+# DIN – Deep Interest Network (KDD 2018, Alibaba)
+# ─────────────────────────────────────────────────────────────
+DIN_kuairand_1k:
+    model: DIN
+    dataset_id: kuairand_1k
+
+    loss: binary_crossentropy
+    metrics: [logloss, AUC]
+    task: binary_classification
+    optimizer: adam
+    learning_rate: 1.0e-3
+
+    # Batch / training
+    batch_size: 4096
+    epochs: 20
+    shuffle: True
+    seed: 2024
+
+    # Embedding
+    embedding_dim: 16
+    embedding_regularizer: 1.0e-6
+
+    # DIN attention: which sequence to attend over and the target item
+    # These must match the feature names in dataset_config.yaml
+    din_sequence_field: hist_video_ids
+    din_target_field: video_id
+    # Attention activation: "sigmoid" (original) or "relu"
+    din_attention_hidden_units: [64]
+    din_attention_activation: sigmoid
+    din_use_softmax: False
+
+    # DNN head (after attention-pooled sequence concat with other features)
+    hidden_units: [512, 256, 128]
+    hidden_activations: relu
+    net_dropout: 0.1
+    batch_norm: True
+    net_regularizer: 0
+
+    monitor: AUC
+    monitor_mode: max
+
+# ─────────────────────────────────────────────────────────────
+# BST – Behaviour Sequence Transformer (DLP-KDD 2019, Alibaba)
+# ─────────────────────────────────────────────────────────────
+BST_kuairand_1k:
+    model: BST
+    dataset_id: kuairand_1k
+
+    loss: binary_crossentropy
+    metrics: [logloss, AUC]
+    task: binary_classification
+    optimizer: adam
+    learning_rate: 1.0e-3
+
+    # Batch / training
+    batch_size: 2048              # smaller due to transformer memory cost
+    epochs: 20
+    shuffle: True
+    seed: 2024
+
+    # Embedding
+    embedding_dim: 16
+    embedding_regularizer: 1.0e-6
+
+    # BST transformer block
+    bst_sequence_field: hist_video_ids
+    bst_target_field: video_id
+    transformer_layers: 2         # number of stacked transformer blocks
+    num_heads: 4                  # multi-head attention heads
+    seq_pooling_type: target      # "target" uses target-item position output
+                                  # alternatives: "mean" | "sum"
+    use_position_emb: True        # positional embeddings for temporal order
+    layer_norm: True
+    use_causal_mask: False        # full bidirectional attention over history
+
+    # MLP head after transformer
+    hidden_units: [512, 256, 128]
+    hidden_activations: relu
+    net_dropout: 0.2
+    batch_norm: True
+    net_regularizer: 0
+
+    monitor: AUC
+    monitor_mode: max

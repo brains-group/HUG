@@ -1,0 +1,279 @@
+"""
+KuaiRand-1K Data Loader
+------------------------
+Reads raw CSV files from a local KuaiRand-1K directory and returns
+clean, typed DataFrames ready for HKG construction.
+
+Expected directory layout (KuaiRand-1K default):
+    data_dir/
+        log_standard_4_08_to_4_21_1k.csv
+        log_standard_4_22_to_5_08_1k.csv
+        log_random_4_22_to_5_08_1k.csv
+        user_features_1k.csv
+        video_features_basic_1k.csv
+        video_features_statistic_1k.csv
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass, field
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+logger = logging.getLogger(__name__)
+
+
+# ── File name constants ────────────────────────────────────────────────────────
+
+LOG_STANDARD_EARLY = "log_standard_4_08_to_4_21_1k.csv"
+LOG_STANDARD_LATE  = "log_standard_4_22_to_5_08_1k.csv"
+LOG_RANDOM         = "log_random_4_22_to_5_08_1k.csv"
+USER_FEATURES      = "user_features_1k.csv"
+VIDEO_BASIC        = "video_features_basic_1k.csv"
+VIDEO_STATISTIC    = "video_features_statistic_1k.csv"
+
+# Columns that are always binary (0/1) in the interaction logs
+BINARY_LOG_COLS = [
+    "is_click", "is_like", "is_follow", "is_comment",
+    "is_forward", "is_hate", "long_view", "is_profile_enter", "is_rand",
+]
+
+# Session boundary: gap larger than this (ms) → new session
+SESSION_GAP_MS = 30 * 60 * 1000  # 30 minutes
+
+
+@dataclass
+class KuaiRandData:
+    """Container returned by KuaiRandLoader.load()."""
+
+    log_standard:      pd.DataFrame   # combined standard-policy interaction logs
+    log_random:        pd.DataFrame   # random-policy interaction logs
+    user_features:     pd.DataFrame   # one row per user
+    video_basic:       pd.DataFrame   # one row per video (basic metadata)
+    video_statistic:   pd.DataFrame   # one row per video (aggregate statistics)
+
+    # Derived artefacts populated during load
+    log_combined:      pd.DataFrame = field(default_factory=pd.DataFrame)
+    session_map:       pd.DataFrame = field(default_factory=pd.DataFrame)  # interaction → session_id
+
+    # Re-indexed id maps (str → contiguous int)
+    user_id_map:       dict = field(default_factory=dict)
+    video_id_map:      dict = field(default_factory=dict)
+    author_id_map:     dict = field(default_factory=dict)
+    category_id_map:   dict = field(default_factory=dict)
+
+    def __repr__(self) -> str:  # pragma: no cover
+        return (
+            f"KuaiRandData("
+            f"users={len(self.user_features)}, "
+            f"videos={len(self.video_basic)}, "
+            f"std_interactions={len(self.log_standard)}, "
+            f"rand_interactions={len(self.log_random)}, "
+            f"sessions={self.session_map['session_id'].nunique() if len(self.session_map) else 0}"
+            f")"
+        )
+
+
+class KuaiRandLoader:
+    """
+    Loads KuaiRand-1K from a local directory into typed DataFrames.
+
+    Parameters
+    ----------
+    data_dir : str | Path
+        Root directory containing the six KuaiRand-1K CSV files.
+    min_interactions : int
+        Drop users with fewer than this many interactions (removes extreme
+        cold-start noise before graph construction).
+    filter_ads : bool
+        When True, AD-type videos are removed from the video table and all
+        logs referencing them.  Set False to model ads explicitly.
+    """
+
+    def __init__(
+        self,
+        data_dir: str | Path,
+        min_interactions: int = 10,
+        filter_ads: bool = True,
+    ) -> None:
+        self.data_dir = Path(data_dir)
+        self.min_interactions = min_interactions
+        self.filter_ads = filter_ads
+        self._validate_directory()
+
+    # ── Public API ─────────────────────────────────────────────────────────────
+
+    def load(self) -> KuaiRandData:
+        """Read, clean, and join all KuaiRand-1K files.
+
+        Returns
+        -------
+        KuaiRandData
+            Fully populated data container.
+        """
+        logger.info("Loading KuaiRand-1K from %s", self.data_dir)
+
+        log_std   = self._load_logs(standard=True)
+        log_rand  = self._load_logs(standard=False)
+        user_feat = self._load_user_features()
+        vid_basic = self._load_video_basic()
+        vid_stat  = self._load_video_statistic()
+
+        if self.filter_ads:
+            ad_ids   = set(vid_basic.loc[vid_basic["video_type"] == "AD", "video_id"])
+            vid_basic = vid_basic[vid_basic["video_type"] == "NORMAL"].copy()
+            log_std   = log_std[~log_std["video_id"].isin(ad_ids)].copy()
+            log_rand  = log_rand[~log_rand["video_id"].isin(ad_ids)].copy()
+            logger.info("Filtered %d AD videos", len(ad_ids))
+
+        log_std  = self._filter_active_users(log_std)
+        log_combined = self._combine_logs(log_std, log_rand)
+        session_map  = self._derive_sessions(log_combined)
+
+        data = KuaiRandData(
+            log_standard    = log_std,
+            log_random      = log_rand,
+            user_features   = user_feat,
+            video_basic     = vid_basic,
+            video_statistic = vid_stat,
+            log_combined    = log_combined,
+            session_map     = session_map,
+        )
+
+        data.user_id_map     = self._build_id_map(data.user_features["user_id"])
+        data.video_id_map    = self._build_id_map(data.video_basic["video_id"])
+        data.author_id_map   = self._build_id_map(data.video_basic["author_id"].dropna())
+        data.category_id_map = self._build_category_map(data.video_basic)
+
+        logger.info("Load complete → %s", data)
+        return data
+
+    # ── Private helpers ────────────────────────────────────────────────────────
+
+    def _validate_directory(self) -> None:
+        if not self.data_dir.is_dir():
+            raise FileNotFoundError(f"data_dir not found: {self.data_dir}")
+        required = [LOG_STANDARD_EARLY, LOG_STANDARD_LATE, LOG_RANDOM,
+                    USER_FEATURES, VIDEO_BASIC, VIDEO_STATISTIC]
+        missing = [f for f in required if not (self.data_dir / f).exists()]
+        if missing:
+            raise FileNotFoundError(f"Missing KuaiRand-1K files: {missing}")
+
+    def _load_logs(self, standard: bool) -> pd.DataFrame:
+        if standard:
+            early = pd.read_csv(self.data_dir / LOG_STANDARD_EARLY)
+            late  = pd.read_csv(self.data_dir / LOG_STANDARD_LATE)
+            df    = pd.concat([early, late], ignore_index=True)
+            df["is_rand"] = 0
+        else:
+            df = pd.read_csv(self.data_dir / LOG_RANDOM)
+            df["is_rand"] = 1
+
+        # Cast binary columns
+        for col in BINARY_LOG_COLS:
+            if col in df.columns:
+                df[col] = df[col].fillna(0).astype(np.int8)
+
+        # Derived continuous features
+        df["play_ratio"] = (
+            df["play_time_ms"] / df["duration_ms"].replace(0, np.nan)
+        ).clip(0, 1).fillna(0).astype(np.float32)
+
+        df = df.sort_values(["user_id", "time_ms"]).reset_index(drop=True)
+        logger.info("Loaded %s log: %d rows", "standard" if standard else "random", len(df))
+        return df
+
+    def _load_user_features(self) -> pd.DataFrame:
+        df = pd.read_csv(self.data_dir / USER_FEATURES)
+
+        # Ordinal-encode activity degree
+        activity_order = {"full_active": 3, "high_active": 2, "middle_active": 1, "UNKNOWN": 0}
+        df["activity_level"] = df["user_active_degree"].map(activity_order).fillna(0).astype(np.int8)
+
+        # Log-scale social counts
+        for col in ["follow_user_num", "fans_user_num", "friend_user_num", "register_days"]:
+            if col in df.columns:
+                df[f"{col}_log"] = np.log1p(df[col].fillna(0)).astype(np.float32)
+
+        return df
+
+    def _load_video_basic(self) -> pd.DataFrame:
+        df = pd.read_csv(self.data_dir / VIDEO_BASIC)
+
+        # Parse multi-valued tag column into a list
+        df["tag_list"] = (
+            df["tag"].fillna("").astype(str)
+            .apply(lambda x: [int(t) for t in x.split(",") if t.strip().isdigit()])
+        )
+
+        # Aspect ratio
+        df["aspect_ratio"] = (
+            df["server_width"] / df["server_height"].replace(0, np.nan)
+        ).fillna(1.0).astype(np.float32)
+
+        # Duration in seconds (more readable)
+        df["duration_s"] = (df["video_duration"] / 1000).fillna(0).astype(np.float32)
+
+        return df
+
+    def _load_video_statistic(self) -> pd.DataFrame:
+        df = pd.read_csv(self.data_dir / VIDEO_STATISTIC)
+
+        # Global CVR prior: valid plays / shows
+        df["global_cvr"] = (
+            df["valid_play_cnt"] / df["show_cnt"].replace(0, np.nan)
+        ).clip(0, 1).fillna(0).astype(np.float32)
+
+        # Log-transform skewed popularity counts
+        for col in ["show_cnt", "play_cnt", "like_cnt", "follow_cnt",
+                    "share_cnt", "collect_cnt", "comment_cnt"]:
+            if col in df.columns:
+                df[f"{col}_log"] = np.log1p(df[col].fillna(0)).astype(np.float32)
+
+        return df
+
+    def _filter_active_users(self, log: pd.DataFrame) -> pd.DataFrame:
+        counts = log["user_id"].value_counts()
+        active = counts[counts >= self.min_interactions].index
+        filtered = log[log["user_id"].isin(active)].copy()
+        logger.info(
+            "User filter: kept %d / %d users (min_interactions=%d)",
+            len(active), counts.shape[0], self.min_interactions,
+        )
+        return filtered
+
+    def _combine_logs(self, log_std: pd.DataFrame, log_rand: pd.DataFrame) -> pd.DataFrame:
+        combined = pd.concat([log_std, log_rand], ignore_index=True)
+        combined = combined.sort_values(["user_id", "time_ms"]).reset_index(drop=True)
+        return combined
+
+    def _derive_sessions(self, log: pd.DataFrame) -> pd.DataFrame:
+        """Assign a unique session_id to each (user, continuous-activity-window) block."""
+        df = log[["user_id", "time_ms"]].copy()
+        df["prev_time"] = df.groupby("user_id")["time_ms"].shift(1)
+        df["gap_ms"]    = df["time_ms"] - df["prev_time"]
+
+        # New session when gap > threshold OR first interaction for user
+        df["new_session"] = (df["gap_ms"] > SESSION_GAP_MS) | df["gap_ms"].isna()
+        df["session_id"]  = df["new_session"].cumsum().astype(np.int32)
+
+        logger.info("Derived %d sessions for %d users",
+                    df["session_id"].nunique(), log["user_id"].nunique())
+        return df[["session_id"]].join(log.reset_index(drop=True))
+
+    @staticmethod
+    def _build_id_map(series: pd.Series) -> dict:
+        """Map raw IDs → contiguous integers starting at 0."""
+        unique = sorted(series.dropna().unique())
+        return {raw_id: idx for idx, raw_id in enumerate(unique)}
+
+    @staticmethod
+    def _build_category_map(video_basic: pd.DataFrame) -> dict:
+        """Collect all unique category tag integers and map to indices."""
+        all_tags: set[int] = set()
+        for tag_list in video_basic["tag_list"]:
+            all_tags.update(tag_list)
+        return {tag: idx for idx, tag in enumerate(sorted(all_tags))}
