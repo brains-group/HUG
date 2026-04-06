@@ -599,38 +599,59 @@ class _HGTLayer(nn.Module):
         h          : [N, hidden_dim]
         edge_index : [2, E]
         edge_type  : [E]  integer in [0, n_edge_types)
+
+        Memory-safe implementation: processes each edge type separately rather
+        than gathering all edges into one [E, H, H] batch.
+
+        The previous implementation did:
+            WQ = self.W_Q[et]   # [E, H, H]  ← this was the OOM: E=2M, H=128
+                                              #   → 2M × 128 × 128 × 4B = 131 GB
+        This version iterates over edge types so peak allocation per type is
+            max_edges_per_type × H × H  (e.g. 200K × 128 × 128 × 4B ≈ 13 GB)
+        which fits comfortably within GPU memory.
         """
         N   = h.shape[0]
-        src = edge_index[0]
-        dst = edge_index[1]
-        et  = edge_type
-
-        # Per-edge: look up type-specific projections
-        # W_Q[et]: [E, H, H] — apply to dst (query), W_K/W_V to src (key/value)
-        h_src = h[src]   # [E, hidden_dim]
-        h_dst = h[dst]   # [E, hidden_dim]
-
-        # Batch matmul via einsum: [E, H] = [E, H, H] @ [E, H]
-        WQ = self.W_Q[et]   # [E, H, H]
-        WK = self.W_K[et]
-        WV = self.W_V[et]
-
-        q = torch.bmm(WQ, h_dst.unsqueeze(-1)).squeeze(-1)   # [E, H]
-        k = torch.bmm(WK, h_src.unsqueeze(-1)).squeeze(-1)   # [E, H]
-        v = torch.bmm(WV, h_src.unsqueeze(-1)).squeeze(-1)   # [E, H]
-
-        # Scaled dot-product attention score per edge
-        attn = (q * k).sum(-1) * self.scale   # [E]
-
-        # Softmax per destination node (scatter softmax)
-        attn_exp = torch.exp(attn - attn.max())
-        denom    = torch.zeros(N, device=h.device).scatter_add(0, dst, attn_exp)
-        attn_w   = attn_exp / (denom[dst] + 1e-8)   # [E]
-
-        # Weighted sum of values into destination nodes
-        msg = attn_w.unsqueeze(-1) * v             # [E, H]
         agg = torch.zeros(N, self.hidden_dim, device=h.device)
-        agg.scatter_add_(0, dst.unsqueeze(-1).expand_as(msg), msg)
+
+        # Accumulate scatter-add contributions type by type
+        # attn_exp_sum used for the per-node softmax denominator
+        denom = torch.zeros(N, device=h.device)
+
+        # First pass: compute raw (un-normalised) weighted messages per type
+        # Store (dst, msg_unnorm) pairs so we can normalise after all types
+        raw_msgs: list[tuple[Tensor, Tensor]] = []
+
+        for t in range(self.W_Q.shape[0]):
+            mask = edge_type == t
+            if mask.sum() == 0:
+                continue
+
+            src_t = edge_index[0][mask]   # [E_t]
+            dst_t = edge_index[1][mask]   # [E_t]
+
+            h_src_t = h[src_t]            # [E_t, H]
+            h_dst_t = h[dst_t]            # [E_t, H]
+
+            # Per-type projection: [E_t, H] = h @ W^T
+            # h @ W^T is equivalent to (W @ h^T)^T but avoids [E_t, H, H]
+            q_t = h_dst_t @ self.W_Q[t].t()   # [E_t, H]
+            k_t = h_src_t @ self.W_K[t].t()   # [E_t, H]
+            v_t = h_src_t @ self.W_V[t].t()   # [E_t, H]
+
+            attn_t = (q_t * k_t).sum(-1) * self.scale   # [E_t]
+            exp_t  = torch.exp(attn_t - attn_t.max())   # [E_t]
+
+            # Accumulate denominator
+            denom.scatter_add_(0, dst_t, exp_t)
+
+            # Store un-normalised weighted value for second pass
+            raw_msgs.append((dst_t, exp_t, v_t))
+
+        # Second pass: normalise and scatter into agg
+        for dst_t, exp_t, v_t in raw_msgs:
+            w_t  = exp_t / (denom[dst_t] + 1e-8)        # [E_t]
+            msg  = w_t.unsqueeze(-1) * v_t              # [E_t, H]
+            agg.scatter_add_(0, dst_t.unsqueeze(-1).expand_as(msg), msg)
 
         # Residual update
         h_new = self.update(torch.cat([h, agg], dim=-1))

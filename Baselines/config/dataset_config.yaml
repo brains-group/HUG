@@ -5,10 +5,11 @@
 # ─────────────────────────────────────────────────────────────
 
 kuairand_1k:
-    data_root: ./data/processed/h5/
-    train_data: ./data/processed/train.csv
-    valid_data: ./data/processed/valid.csv
-    test_data:  ./data/processed/test.csv
+    data_root: /home/dasgua3/GCIC/Baselines/data/processed/
+    data_format: csv
+    train_data: /home/dasgua3/GCIC/Baselines/data/processed/kuairand_1k/train.csv
+    valid_data: /home/dasgua3/GCIC/Baselines/data/processed/kuairand_1k/valid.csv
+    test_data:  /home/dasgua3/GCIC/Baselines/data/processed/kuairand_1k/test.csv
     min_categr_count: 2        # drop tokens seen < 2 times → maps to OOV
 
     feature_cols:

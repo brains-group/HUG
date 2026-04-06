@@ -34,28 +34,28 @@ DIN_kuairand_1k:
     optimizer: adam
     learning_rate: 1.0e-3
 
-    # Batch / training
     batch_size: 4096
     epochs: 20
     shuffle: True
     seed: 2024
 
-    # Embedding
     embedding_dim: 16
     embedding_regularizer: 1.0e-6
 
-    # DIN attention: which sequence to attend over and the target item
-    # These must match the feature names in dataset_config.yaml
-    din_sequence_field: hist_video_ids
-    din_target_field: video_id
-    # Attention activation: "sigmoid" (original) or "relu"
-    din_attention_hidden_units: [64]
-    din_attention_activation: sigmoid
+    # Must be lists of tuples: (target_field, sequence_field)
+    din_target_field: ["video_id"]
+    din_sequence_field: ["hist_video_ids"]
+
+    # Attention parameters (actual DIN parameter names)
+    attention_hidden_units: [64]
+    attention_hidden_activations: Dice
+    attention_output_activation: null
+    attention_dropout: 0
     din_use_softmax: False
 
-    # DNN head (after attention-pooled sequence concat with other features)
-    hidden_units: [512, 256, 128]
-    hidden_activations: relu
+    # DNN head
+    dnn_hidden_units: [512, 256, 128]
+    dnn_activations: ReLU
     net_dropout: 0.1
     batch_norm: True
     net_regularizer: 0
@@ -76,33 +76,35 @@ BST_kuairand_1k:
     optimizer: adam
     learning_rate: 1.0e-3
 
-    # Batch / training
-    batch_size: 2048              # smaller due to transformer memory cost
+    batch_size: 2048
     epochs: 20
     shuffle: True
     seed: 2024
 
-    # Embedding
     embedding_dim: 16
     embedding_regularizer: 1.0e-6
 
-    # BST transformer block
-    bst_sequence_field: hist_video_ids
-    bst_target_field: video_id
-    transformer_layers: 2         # number of stacked transformer blocks
-    num_heads: 4                  # multi-head attention heads
-    seq_pooling_type: target      # "target" uses target-item position output
-                                  # alternatives: "mean" | "sum"
-    use_position_emb: True        # positional embeddings for temporal order
-    layer_norm: True
-    use_causal_mask: False        # full bidirectional attention over history
+    # Must be lists of tuples: (target_field, sequence_field)
+    bst_target_field: ["video_id"]
+    bst_sequence_field: ["hist_video_ids"]
 
-    # MLP head after transformer
-    hidden_units: [512, 256, 128]
-    hidden_activations: relu
+    # Transformer parameters (actual BST parameter names)
+    num_heads: 4
+    stacked_transformer_layers: 2      # was transformer_layers
+    attention_dropout: 0
+    layer_norm: True
+    use_residual: True
+
+    # DNN head
+    dnn_hidden_units: [512, 256, 128]
+    dnn_activations: ReLU
     net_dropout: 0.2
     batch_norm: True
     net_regularizer: 0
 
     monitor: AUC
     monitor_mode: max
+
+    seq_pooling_type: target      # "mean", "sum", "target", or "concat"
+    use_position_emb: True
+    use_causal_mask: False

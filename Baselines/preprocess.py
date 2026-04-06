@@ -4,7 +4,7 @@ step1_preprocess.py
 Prepares KuaiRand-1K for FuxiCTR DIN / BST.
 
 Expected raw files (place in ./data/raw/):
-  - log_standard_4_08_to_4_21_1k_users.csv   (interaction log)
+  - log_standard_4_08_to_4_21_1k.csv   (interaction log)
   - user_features_1k.csv                      (user side features)
   - video_features_basic_1k.csv               (item side features)
 
@@ -21,8 +21,8 @@ import numpy as np
 from datetime import datetime
 
 # ── paths ──────────────────────────────────────────────────────────────────
-RAW_DIR  = "../KuaiRand-1K"
-OUT_DIR  = "./data/processed"
+RAW_DIR  = "../KuaiRand-1K/data"
+OUT_DIR  = "./data/processed/kuairand_1k/"
 os.makedirs(OUT_DIR, exist_ok=True)
 
 # Max history length fed to DIN / BST
@@ -34,7 +34,7 @@ VALID_RATIO = 0.1   # remaining 0.1 → test
 
 print(f"[{datetime.now():%H:%M:%S}] Loading interaction log …")
 log = pd.read_csv(
-    os.path.join(RAW_DIR, "log_standard_4_08_to_4_21_1k_users.csv"),
+    os.path.join(RAW_DIR, "log_standard_4_08_to_4_21_1k.csv"),
     dtype={
         "user_id":   str,
         "video_id":  str,
@@ -46,15 +46,15 @@ log = pd.read_csv(
         "long_view": float,
         "play_time_ms":   float,
         "duration_ms":    float,
-        "timestamp":      float,
+        "time_ms":      float,
         "is_random":      float,
     },
     low_memory=False,
 )
 
 # ── sort chronologically within each user ──────────────────────────────────
-print(f"[{datetime.now():%H:%M:%S}] Sorting by user × timestamp …")
-log = log.sort_values(["user_id", "timestamp"]).reset_index(drop=True)
+print(f"[{datetime.now():%H:%M:%S}] Sorting by user × time_ms …")
+log = log.sort_values(["user_id", "time_ms"]).reset_index(drop=True)
 
 # ── build history sequence column ─────────────────────────────────────────
 print(f"[{datetime.now():%H:%M:%S}] Building behaviour sequences (max_len={MAX_SEQ_LEN}) …")
@@ -117,8 +117,8 @@ if "duration_ms" in log.columns:
 else:
     log["duration_ms"] = 0.0
 
-# ── normalise timestamp to [0,1] ──────────────────────────────────────────
-ts = pd.to_numeric(log["timestamp"], errors="coerce")
+# ── normalise time_ms to [0,1] ──────────────────────────────────────────
+ts = pd.to_numeric(log["time_ms"], errors="coerce")
 ts_min, ts_max = ts.min(), ts.max()
 log["timestamp_norm"] = ((ts - ts_min) / (ts_max - ts_min + 1e-9)).fillna(0.0)
 

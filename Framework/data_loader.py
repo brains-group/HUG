@@ -1,17 +1,30 @@
 """
-KuaiRand-1K Data Loader
-------------------------
-Reads raw CSV files from a local KuaiRand-1K directory and returns
+KuaiRand Data Loader
+---------------------
+Reads raw CSV files from a local KuaiRand directory and returns
 clean, typed DataFrames ready for HKG construction.
 
-Expected directory layout (KuaiRand-1K default):
-    data_dir/
-        log_standard_4_08_to_4_21_1k.csv
-        log_standard_4_22_to_5_08_1k.csv
-        log_random_4_22_to_5_08_1k.csv
-        user_features_1k.csv
-        video_features_basic_1k.csv
-        video_features_statistic_1k.csv
+Supports both KuaiRand-1K and KuaiRand-27K layouts automatically.
+
+KuaiRand-1K layout:
+    log_standard_4_08_to_4_21_1k.csv
+    log_standard_4_22_to_5_08_1k.csv
+    log_random_4_22_to_5_08_1k.csv
+    user_features_1k.csv
+    video_features_basic_1k.csv
+    video_features_statistic_1k.csv
+
+KuaiRand-27K layout (multi-part files):
+    log_standard_4_08_to_4_21_27k_part1.csv
+    log_standard_4_08_to_4_21_27k_part2.csv
+    log_standard_4_22_to_5_08_27k_part1.csv
+    log_standard_4_22_to_5_08_27k_part2.csv
+    log_random_4_22_to_5_08_27k.csv
+    user_features_27k.csv
+    video_features_basic_27k.csv
+    video_features_statistic_27k_part1.csv
+    video_features_statistic_27k_part2.csv
+    video_features_statistic_27k_part3.csv
 """
 
 from __future__ import annotations
@@ -28,12 +41,43 @@ logger = logging.getLogger(__name__)
 
 # ── File name constants ────────────────────────────────────────────────────────
 
-LOG_STANDARD_EARLY = "log_standard_4_08_to_4_21_1k.csv"
-LOG_STANDARD_LATE  = "log_standard_4_22_to_5_08_1k.csv"
-LOG_RANDOM         = "log_random_4_22_to_5_08_1k.csv"
-USER_FEATURES      = "user_features_1k.csv"
-VIDEO_BASIC        = "video_features_basic_1k.csv"
-VIDEO_STATISTIC    = "video_features_statistic_1k.csv"
+# KuaiRand-1K filenames
+FILES_1K = {
+    "log_std_early": ["log_standard_4_08_to_4_21_1k.csv"],
+    "log_std_late":  ["log_standard_4_22_to_5_08_1k.csv"],
+    "log_random":    ["log_random_4_22_to_5_08_1k.csv"],
+    "user":          "user_features_1k.csv",
+    "video_basic":   "video_features_basic_1k.csv",
+    "video_stat":    ["video_features_statistic_1k.csv"],
+}
+
+# KuaiRand-27K filenames (multi-part splits)
+FILES_27K = {
+    "log_std_early": [
+        "log_standard_4_08_to_4_21_27k_part1.csv",
+        "log_standard_4_08_to_4_21_27k_part2.csv",
+    ],
+    "log_std_late": [
+        "log_standard_4_22_to_5_08_27k_part1.csv",
+        "log_standard_4_22_to_5_08_27k_part2.csv",
+    ],
+    "log_random":   ["log_random_4_22_to_5_08_27k.csv"],
+    "user":          "user_features_27k.csv",
+    "video_basic":   "video_features_basic_27k.csv",
+    "video_stat":    [
+        "video_features_statistic_27k_part1.csv",
+        "video_features_statistic_27k_part2.csv",
+        "video_features_statistic_27k_part3.csv",
+    ],
+}
+
+# Legacy single-file constants kept for backward compatibility
+LOG_STANDARD_EARLY = FILES_1K["log_std_early"][0]
+LOG_STANDARD_LATE  = FILES_1K["log_std_late"][0]
+LOG_RANDOM         = FILES_1K["log_random"][0]
+USER_FEATURES      = FILES_1K["user"]
+VIDEO_BASIC        = FILES_1K["video_basic"]
+VIDEO_STATISTIC    = FILES_1K["video_stat"][0]
 
 # Columns that are always binary (0/1) in the interaction logs
 BINARY_LOG_COLS = [
@@ -102,7 +146,16 @@ class KuaiRandLoader:
         self.data_dir = Path(data_dir)
         self.min_interactions = min_interactions
         self.filter_ads = filter_ads
+        self._files = self._detect_scale()
         self._validate_directory()
+
+    def _detect_scale(self) -> dict:
+        """Auto-detect whether this is a 1K or 27K directory by probing filenames."""
+        if (self.data_dir / FILES_27K["user"]).exists():
+            logger.info("Detected KuaiRand-27K layout")
+            return FILES_27K
+        logger.info("Detected KuaiRand-1K layout")
+        return FILES_1K
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
@@ -156,20 +209,35 @@ class KuaiRandLoader:
     def _validate_directory(self) -> None:
         if not self.data_dir.is_dir():
             raise FileNotFoundError(f"data_dir not found: {self.data_dir}")
-        required = [LOG_STANDARD_EARLY, LOG_STANDARD_LATE, LOG_RANDOM,
-                    USER_FEATURES, VIDEO_BASIC, VIDEO_STATISTIC]
-        missing = [f for f in required if not (self.data_dir / f).exists()]
+        f = self._files
+        required = (
+            f["log_std_early"] + f["log_std_late"] + f["log_random"]
+            + [f["user"], f["video_basic"]]
+            + f["video_stat"]
+        )
+        missing = [fn for fn in required if not (self.data_dir / fn).exists()]
         if missing:
-            raise FileNotFoundError(f"Missing KuaiRand-1K files: {missing}")
+            scale = "27K" if f is FILES_27K else "1K"
+            raise FileNotFoundError(
+                f"Missing KuaiRand-{scale} files in {self.data_dir}:\n"
+                + "\n".join(f"  {fn}" for fn in missing)
+            )
 
     def _load_logs(self, standard: bool) -> pd.DataFrame:
         if standard:
-            early = pd.read_csv(self.data_dir / LOG_STANDARD_EARLY)
-            late  = pd.read_csv(self.data_dir / LOG_STANDARD_LATE)
-            df    = pd.concat([early, late], ignore_index=True)
+            parts = (
+                self._files["log_std_early"] + self._files["log_std_late"]
+            )
+            dfs = []
+            for fname in parts:
+                logger.info("Reading %s …", fname)
+                dfs.append(pd.read_csv(self.data_dir / fname))
+            df = pd.concat(dfs, ignore_index=True)
             df["is_rand"] = 0
         else:
-            df = pd.read_csv(self.data_dir / LOG_RANDOM)
+            parts = self._files["log_random"]
+            dfs = [pd.read_csv(self.data_dir / fname) for fname in parts]
+            df = pd.concat(dfs, ignore_index=True)
             df["is_rand"] = 1
 
         # Cast binary columns
@@ -187,7 +255,7 @@ class KuaiRandLoader:
         return df
 
     def _load_user_features(self) -> pd.DataFrame:
-        df = pd.read_csv(self.data_dir / USER_FEATURES)
+        df = pd.read_csv(self.data_dir / self._files["user"])
 
         # Ordinal-encode activity degree
         activity_order = {"full_active": 3, "high_active": 2, "middle_active": 1, "UNKNOWN": 0}
@@ -201,7 +269,7 @@ class KuaiRandLoader:
         return df
 
     def _load_video_basic(self) -> pd.DataFrame:
-        df = pd.read_csv(self.data_dir / VIDEO_BASIC)
+        df = pd.read_csv(self.data_dir / self._files["video_basic"])
 
         # Parse multi-valued tag column into a list
         df["tag_list"] = (
@@ -220,7 +288,12 @@ class KuaiRandLoader:
         return df
 
     def _load_video_statistic(self) -> pd.DataFrame:
-        df = pd.read_csv(self.data_dir / VIDEO_STATISTIC)
+        parts = self._files["video_stat"]
+        dfs = []
+        for fname in parts:
+            logger.info("Reading %s …", fname)
+            dfs.append(pd.read_csv(self.data_dir / fname))
+        df = pd.concat(dfs, ignore_index=True) if len(dfs) > 1 else dfs[0]
 
         # Global CVR prior: valid plays / shows
         df["global_cvr"] = (

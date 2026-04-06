@@ -976,7 +976,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--cache-dir",  type=str, default=None,
                    help="Directory for HKG cache and model checkpoint. "
                         "Defaults to ./cache/<scale>. Set to 'none' to disable.")
-    p.add_argument("--output-dir", type=str, default="./runs",
+    p.add_argument("--output-dir", type=str, default="../runs",
                    help="Directory for metrics JSON and training history")
     p.add_argument("--scale",      type=str, default="1k", choices=["1k", "27k"],
                    help="Dataset scale — used for file naming only")

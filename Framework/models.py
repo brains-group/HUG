@@ -504,8 +504,8 @@ class SingleGNNModel(nn.Module):
         Session context is baked into the video embedding by the HGT
         (next_in_session edges propagate session signal to video nodes).
         """
-        h_user  = emb["user"][user_idx]           # [B, D]
-        h_video = emb["video"][video_idx]         # [B, D]
+        h_user  = emb["s_user"][user_idx]           # [B, D]
+        h_video = emb["s_video"][video_idx]        # [B, D]
 
         # Simple concatenation instead of cross-attention alignment
         fused  = torch.cat([h_user, h_video], dim=-1)   # [B, D*2]

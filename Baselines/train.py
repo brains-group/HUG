@@ -36,8 +36,8 @@ from datetime import datetime
 FUXICTR_ROOT = os.environ.get("FUXICTR_ROOT", "./FuxiCTR")
 
 MODEL_ZOO_PATHS = {
-    "DIN": os.path.join(FUXICTR_ROOT, "model_zoo", "DIN", "DIN_torch"),
-    "BST": os.path.join(FUXICTR_ROOT, "model_zoo", "BST", "BST_torch"),
+    "DIN": os.path.join(FUXICTR_ROOT, "model_zoo", "DIN"),
+    "BST": os.path.join(FUXICTR_ROOT, "model_zoo", "BST"),
 }
 
 EXPID_MAP = {
