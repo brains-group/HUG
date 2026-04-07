@@ -360,7 +360,7 @@ def build_model(data: KuaiRandData, bundle: HKGBundle,
         out_dim        = out_dim,
         num_layers     = 2,
     )
-    align = AlignmentModule(emb_dim=out_dim, kg_relation_dim=0, num_heads=4)
+    align = AlignmentModule(emb_dim=out_dim, kg_relation_dim=args.kg-alignment, num_heads=4)
     head  = CVRHead(fused_dim=out_dim, hidden_dims=[hidden_dim, hidden_dim // 2])
 
     model    = KuaiCVRModel(struct, seq, align, head).to(device)
@@ -1005,6 +1005,7 @@ def parse_args() -> argparse.Namespace:
                    help="dual: R-GCN + SR-GNN + alignment (proposed). "
                         "single: HGT over full HKG, no alignment (baseline).")
 
+    p.add_argument("--kg-alignment", type=int, default=0)
     # Training
     p.add_argument("--epochs",       type=int,   default=10)
     p.add_argument("--batch-size",   type=int,   default=2048)
