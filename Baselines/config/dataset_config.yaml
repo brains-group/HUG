@@ -62,8 +62,8 @@ kuairand_1k:
            type: sequence,
            splitter: " ",
            max_len: 50,
-           padding: pre,        # pad/truncate from the left
-           encoder: null,       # DIN/BST apply their own pooling
+           padding: pre,             # pad/truncate from the left
+           feature_encoder: null,    # DIN/BST apply their own pooling; null disables pre-pooling
            share_embedding: video_id}
 
     label_col: {name: is_click, dtype: float}
