@@ -1,0 +1,105 @@
+2026-04-07 15:36:25,641 P1744160 INFO FuxiCTR version: 2.3.9
+2026-04-07 15:36:25,641 P1744160 INFO Params: {
+    "attention_dropout": "0",
+    "batch_norm": "True",
+    "batch_size": "2048",
+    "bst_sequence_field": "['hist_video_ids']",
+    "bst_target_field": "['video_id']",
+    "data_format": "csv",
+    "data_root": "/home/dasgua3/GCIC/Baselines/data/processed/",
+    "dataset_id": "kuairand_1k",
+    "debug": "False",
+    "dnn_activations": "ReLU",
+    "dnn_hidden_units": "[512, 256, 128]",
+    "embedding_dim": "16",
+    "embedding_regularizer": "1e-06",
+    "epochs": "20",
+    "every_x_epochs": "1",
+    "feature_cols": "[{'name': 'user_id', 'active': True, 'dtype': 'str', 'type': 'categorical'}, {'name': 'user_active_degree', 'active': True, 'dtype': 'str', 'type': 'categorical'}, {'name': 'follow_user_num_range', 'active': True, 'dtype': 'str', 'type': 'categorical'}, {'name': 'fans_user_num_range', 'active': True, 'dtype': 'str', 'type': 'categorical'}, {'name': 'friend_user_num_range', 'active': True, 'dtype': 'str', 'type': 'categorical'}, {'name': 'register_days_range', 'active': True, 'dtype': 'str', 'type': 'categorical'}, {'name': 'video_id', 'active': True, 'dtype': 'str', 'type': 'categorical'}, {'name': 'author_id', 'active': True, 'dtype': 'str', 'type': 'categorical'}, {'name': 'music_id', 'active': True, 'dtype': 'str', 'type': 'categorical'}, {'name': 'upload_type', 'active': True, 'dtype': 'str', 'type': 'categorical'}, {'name': 'duration_ms', 'active': True, 'dtype': 'float', 'type': 'numeric', 'normalizer': 'MinMaxScaler'}, {'name': 'timestamp_norm', 'active': True, 'dtype': 'float', 'type': 'numeric'}, {'name': 'hist_video_ids', 'active': True, 'dtype': 'str', 'type': 'sequence', 'splitter': ' ', 'max_len': 50, 'padding': 'pre', 'feature_encoder': None, 'share_embedding': 'video_id'}]",
+    "gpu": "0",
+    "label_col": "{'name': 'is_click', 'dtype': 'float'}",
+    "layer_norm": "True",
+    "learning_rate": "0.001",
+    "loss": "binary_crossentropy",
+    "metrics": "['logloss', 'AUC']",
+    "min_categr_count": "2",
+    "model": "BST",
+    "model_id": "BST_kuairand_1k",
+    "model_root": "../../checkpoints/",
+    "monitor": "AUC",
+    "monitor_mode": "max",
+    "net_dropout": "0.2",
+    "net_regularizer": "0",
+    "num_heads": "4",
+    "optimizer": "adam",
+    "partition_block_size": "-1",
+    "patience": "3",
+    "pickle_feature_encoder": "True",
+    "save_best_only": "True",
+    "seed": "2024",
+    "seq_pooling_type": "target",
+    "shuffle": "True",
+    "stacked_transformer_layers": "2",
+    "task": "binary_classification",
+    "test_data": "/home/dasgua3/GCIC/Baselines/data/processed/kuairand_1k/test.csv",
+    "train_data": "/home/dasgua3/GCIC/Baselines/data/processed/kuairand_1k/train.csv",
+    "use_causal_mask": "False",
+    "use_hdf5": "True",
+    "use_position_emb": "True",
+    "use_residual": "True",
+    "valid_data": "/home/dasgua3/GCIC/Baselines/data/processed/kuairand_1k/valid.csv",
+    "verbose": "1",
+    "workers": "4"
+}
+2026-04-07 15:36:25,644 P1744160 INFO Set up feature processor...
+2026-04-07 15:36:25,644 P1744160 WARNING Skip rebuilding /home/dasgua3/GCIC/Baselines/data/processed/kuairand_1k/feature_map.json. Please delete it manually if rebuilding is required.
+2026-04-07 15:36:25,644 P1744160 INFO Load feature_map from json: /home/dasgua3/GCIC/Baselines/data/processed/kuairand_1k/feature_map.json
+2026-04-07 15:36:25,645 P1744160 INFO Set column index...
+2026-04-07 15:36:25,645 P1744160 INFO Feature specs: {
+    "author_id": "{'source': '', 'type': 'categorical', 'padding_idx': 0, 'vocab_size': 348385}",
+    "duration_ms": "{'source': '', 'type': 'numeric'}",
+    "fans_user_num_range": "{'source': '', 'type': 'categorical', 'padding_idx': 0, 'vocab_size': 10}",
+    "follow_user_num_range": "{'source': '', 'type': 'categorical', 'padding_idx': 0, 'vocab_size': 10}",
+    "friend_user_num_range": "{'source': '', 'type': 'categorical', 'padding_idx': 0, 'vocab_size': 9}",
+    "hist_video_ids": "{'source': '', 'type': 'sequence', 'share_embedding': 'video_id', 'padding_idx': 0, 'max_len': 50, 'vocab_size': 1798007}",
+    "music_id": "{'source': '', 'type': 'categorical', 'padding_idx': 0, 'vocab_size': 442229}",
+    "register_days_range": "{'source': '', 'type': 'categorical', 'padding_idx': 0, 'vocab_size': 9}",
+    "timestamp_norm": "{'source': '', 'type': 'numeric'}",
+    "upload_type": "{'source': '', 'type': 'categorical', 'padding_idx': 0, 'vocab_size': 30}",
+    "user_active_degree": "{'source': '', 'type': 'categorical', 'padding_idx': 0, 'vocab_size': 9}",
+    "user_id": "{'source': '', 'type': 'categorical', 'padding_idx': 0, 'vocab_size': 813}",
+    "video_id": "{'source': '', 'type': 'categorical', 'padding_idx': 0, 'vocab_size': 1798007}"
+}
+2026-04-07 15:36:29,827 P1744160 INFO Total number of parameters: 41727297.
+2026-04-07 15:36:29,828 P1744160 INFO Loading datasets...
+2026-04-07 15:36:34,992 P1744160 INFO Train samples: total/4044000, blocks/1
+2026-04-07 15:36:35,668 P1744160 INFO Validation samples: total/505500, blocks/1
+2026-04-07 15:36:35,669 P1744160 INFO Loading train and validation data done.
+2026-04-07 15:36:35,669 P1744160 INFO Start training: 1975 batches/epoch
+2026-04-07 15:36:35,669 P1744160 INFO ************ Epoch=1 start ************
+2026-04-07 15:37:45,215 P1744160 INFO Train loss: 0.572382
+2026-04-07 15:37:45,215 P1744160 INFO Evaluation @epoch 1 - batch 1975: 
+2026-04-07 15:37:51,119 P1744160 INFO [Metrics] AUC: 0.722539
+2026-04-07 15:37:51,121 P1744160 INFO Save best model: monitor(max)=0.722539
+2026-04-07 15:37:51,964 P1744160 INFO ************ Epoch=1 end ************
+2026-04-07 15:39:00,737 P1744160 INFO Train loss: 0.479008
+2026-04-07 15:39:00,738 P1744160 INFO Evaluation @epoch 2 - batch 1975: 
+2026-04-07 15:39:05,512 P1744160 INFO [Metrics] AUC: 0.704778
+2026-04-07 15:39:05,513 P1744160 INFO Monitor(max)=0.704778 STOP!
+2026-04-07 15:39:05,513 P1744160 INFO Reduce learning rate on plateau: 0.000100
+2026-04-07 15:39:05,584 P1744160 INFO ************ Epoch=2 end ************
+2026-04-07 15:40:13,399 P1744160 INFO Train loss: 0.286019
+2026-04-07 15:40:13,400 P1744160 INFO Evaluation @epoch 3 - batch 1975: 
+2026-04-07 15:40:17,061 P1744160 INFO [Metrics] AUC: 0.645999
+2026-04-07 15:40:17,062 P1744160 INFO Monitor(max)=0.645999 STOP!
+2026-04-07 15:40:17,062 P1744160 INFO Reduce learning rate on plateau: 0.000010
+2026-04-07 15:40:17,062 P1744160 INFO ********* Epoch=3 early stop *********
+2026-04-07 15:40:17,146 P1744160 INFO Training finished.
+2026-04-07 15:40:17,147 P1744160 INFO Load best model: /home/dasgua3/GCIC/Baselines/FuxiCTR/checkpoints/kuairand_1k/BST_kuairand_1k.model
+2026-04-07 15:40:17,254 P1744160 INFO ****** Validation evaluation ******
+2026-04-07 15:40:21,633 P1744160 INFO [Metrics] logloss: 0.571094 - AUC: 0.722539
+2026-04-07 15:40:21,787 P1744160 INFO ******** Test evaluation ********
+2026-04-07 15:40:21,787 P1744160 INFO Loading datasets...
+2026-04-07 15:40:22,430 P1744160 INFO Test samples: total/505501, blocks/1
+2026-04-07 15:40:22,430 P1744160 INFO Loading test data done.
+2026-04-07 15:40:26,161 P1744160 INFO [Metrics] logloss: 0.592407 - AUC: 0.700858
