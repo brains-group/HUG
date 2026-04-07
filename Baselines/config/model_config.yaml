@@ -43,8 +43,11 @@ DIN_kuairand_1k:
     embedding_regularizer: 1.0e-6
 
     # Must be lists of tuples: (target_field, sequence_field)
-    din_target_field: ["video_id"]
-    din_sequence_field: ["hist_video_ids"]
+    din_target_field:
+    - video_id
+
+    din_sequence_field:
+    - hist_video_ids
 
     # Attention parameters (actual DIN parameter names)
     attention_hidden_units: [64]
@@ -85,8 +88,11 @@ BST_kuairand_1k:
     embedding_regularizer: 1.0e-6
 
     # Must be lists of tuples: (target_field, sequence_field)
-    bst_target_field: ["video_id"]
-    bst_sequence_field: ["hist_video_ids"]
+    bst_target_field:
+    - video_id
+
+    bst_sequence_field:
+    - hist_video_ids
 
     # Transformer parameters (actual BST parameter names)
     num_heads: 4

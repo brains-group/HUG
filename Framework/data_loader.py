@@ -223,35 +223,79 @@ class KuaiRandLoader:
                 + "\n".join(f"  {fn}" for fn in missing)
             )
 
+    # Columns actually needed from the interaction logs — everything else is dropped on read
+    LOG_USECOLS = [
+        "user_id", "video_id", "time_ms", "play_time_ms", "duration_ms",
+        "is_click", "is_like", "is_follow", "is_comment", "is_forward",
+        "is_hate", "long_view", "is_profile_enter", "is_rand", "tab",
+    ]
+    # Compact dtypes applied immediately after each file is read
+    LOG_DTYPES = {
+        "user_id":          np.int32,
+        "video_id":         np.int32,
+        "time_ms":          np.int64,
+        "play_time_ms":     np.float32,
+        "duration_ms":      np.float32,
+        "is_click":         np.int8,
+        "is_like":          np.int8,
+        "is_follow":        np.int8,
+        "is_comment":       np.int8,
+        "is_forward":       np.int8,
+        "is_hate":          np.int8,
+        "long_view":        np.int8,
+        "is_profile_enter": np.int8,
+        "is_rand":          np.int8,
+        "tab":              np.int8,
+    }
+
     def _load_logs(self, standard: bool) -> pd.DataFrame:
-        if standard:
-            parts = (
-                self._files["log_std_early"] + self._files["log_std_late"]
+        parts = (
+            self._files["log_std_early"] + self._files["log_std_late"]
+            if standard else self._files["log_random"]
+        )
+        is_rand_val = np.int8(0 if standard else 1)
+
+        # Determine which usecols actually exist in the files (is_rand may be absent)
+        first_header = pd.read_csv(
+            self.data_dir / parts[0], nrows=0
+        ).columns.tolist()
+        usecols = [c for c in self.LOG_USECOLS if c in first_header]
+        dtypes  = {c: v for c, v in self.LOG_DTYPES.items() if c in usecols}
+
+        # Read and process one file at a time — never hold more than one raw
+        # DataFrame in memory simultaneously
+        chunks: list[pd.DataFrame] = []
+        for fname in parts:
+            logger.info("Reading %s …", fname)
+            part = pd.read_csv(
+                self.data_dir / fname,
+                usecols=usecols,
+                dtype=dtypes,
+                low_memory=False,
             )
-            dfs = []
-            for fname in parts:
-                logger.info("Reading %s …", fname)
-                dfs.append(pd.read_csv(self.data_dir / fname))
-            df = pd.concat(dfs, ignore_index=True)
-            df["is_rand"] = 0
-        else:
-            parts = self._files["log_random"]
-            dfs = [pd.read_csv(self.data_dir / fname) for fname in parts]
-            df = pd.concat(dfs, ignore_index=True)
-            df["is_rand"] = 1
+            # Fill any missing binary columns with 0
+            for col in BINARY_LOG_COLS:
+                if col in part.columns:
+                    part[col] = part[col].fillna(0).astype(np.int8)
 
-        # Cast binary columns
-        for col in BINARY_LOG_COLS:
-            if col in df.columns:
-                df[col] = df[col].fillna(0).astype(np.int8)
+            # Derived play_ratio immediately while only this part is in RAM
+            part["play_ratio"] = (
+                part["play_time_ms"] / part["duration_ms"].replace(0, np.nan)
+            ).clip(0, 1).fillna(0).astype(np.float32)
 
-        # Derived continuous features
-        df["play_ratio"] = (
-            df["play_time_ms"] / df["duration_ms"].replace(0, np.nan)
-        ).clip(0, 1).fillna(0).astype(np.float32)
+            part["is_rand"] = is_rand_val
+            chunks.append(part)
+
+        df = pd.concat(chunks, ignore_index=True)
+        del chunks   # free the list of parts immediately
 
         df = df.sort_values(["user_id", "time_ms"]).reset_index(drop=True)
-        logger.info("Loaded %s log: %d rows", "standard" if standard else "random", len(df))
+        logger.info(
+            "Loaded %s log: %d rows  RAM ~%.1f GB",
+            "standard" if standard else "random",
+            len(df),
+            df.memory_usage(deep=True).sum() / 1e9,
+        )
         return df
 
     def _load_user_features(self) -> pd.DataFrame:
@@ -289,11 +333,32 @@ class KuaiRandLoader:
 
     def _load_video_statistic(self) -> pd.DataFrame:
         parts = self._files["video_stat"]
-        dfs = []
+
+        # Read column names from first part to determine what exists
+        first_header = pd.read_csv(
+            self.data_dir / parts[0], nrows=0
+        ).columns.tolist()
+
+        # Only keep columns we actually use downstream
+        stat_cols = [
+            "video_id", "show_cnt", "valid_play_cnt", "play_cnt",
+            "like_cnt", "follow_cnt", "share_cnt", "collect_cnt", "comment_cnt",
+        ]
+        usecols = [c for c in stat_cols if c in first_header]
+
+        chunks = []
         for fname in parts:
             logger.info("Reading %s …", fname)
-            dfs.append(pd.read_csv(self.data_dir / fname))
-        df = pd.concat(dfs, ignore_index=True) if len(dfs) > 1 else dfs[0]
+            part = pd.read_csv(
+                self.data_dir / fname,
+                usecols=usecols,
+                dtype={"video_id": np.int32},
+                low_memory=False,
+            )
+            chunks.append(part)
+
+        df = pd.concat(chunks, ignore_index=True) if len(chunks) > 1 else chunks[0]
+        del chunks
 
         # Global CVR prior: valid plays / shows
         df["global_cvr"] = (

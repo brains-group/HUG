@@ -7,6 +7,7 @@
 #   bash run_all.sh 0 DIN      # GPU 0, DIN only
 # ─────────────────────────────────────────────────────────────────
 
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
 GPU=${1:--1}
 MODEL=${2:-both}
 

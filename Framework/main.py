@@ -33,21 +33,21 @@ Caching
 Usage
 -----
 # KuaiRand-1K, first run (builds and caches HKG):
-    python main.py --data-dir KuaiRand-1K/data \\
+    python main.py --data-dir /path/to/KuaiRand-1K/data \\
                    --cache-dir ./cache/1k
 
 # KuaiRand-1K, subsequent runs (loads cached HKG):
-    python main.py --data-dir KuaiRand-1K/data \\
+    python main.py --data-dir /path/to/KuaiRand-1K/data \\
                    --cache-dir ./cache/1k
 
 # KuaiRand-27K (larger dims, more edges):
-    python main.py --data-dir KuaiRand-27K/data \\
+    python main.py --data-dir /path/to/KuaiRand-27K/data \\
                    --scale 27k --cache-dir ./cache/27k \\
                    --hidden-dim 256 --out-dim 128 \\
                    --batch-size 1024 --epochs 20
 
 # Resume from checkpoint only (skip training):
-    python main.py --data-dir KuaiRand-1K/data \\
+    python main.py --data-dir /path/to/KuaiRand-1K/data \\
                    --cache-dir ./cache/1k --eval-only
 
 # Full options:
@@ -235,6 +235,10 @@ def temporal_split(data: KuaiRandData,
     Split interactions by time_ms.  The earliest (1-test_ratio) fraction
     is train; the most recent test_ratio fraction is test.
 
+    Memory-efficient for 27K: works with only the columns needed and avoids
+    full DataFrame copies.  Peak RAM is approximately one copy of the 5-column
+    interaction array rather than multiple copies of the full session_map.
+
     Returns np.ndarray of shape [N, 5]:
         columns: user_idx, video_idx, session_idx, ips_weight, is_click
     """
@@ -242,19 +246,33 @@ def temporal_split(data: KuaiRandData,
     vid_map = data.video_id_map
     sm      = data.session_map
 
-    mask = sm["user_id"].isin(uid_map) & sm["video_id"].isin(vid_map)
-    df   = sm[mask].copy()
+    # Work only on the 6 columns we need — avoids copying all ~20 columns
+    needed = ["user_id", "video_id", "session_id", "time_ms", "is_rand", "is_click"]
+    present = [c for c in needed if c in sm.columns]
+    df = sm[present].copy()
 
-    df["u_idx"] = df["user_id"].map(uid_map)
-    df["v_idx"] = df["video_id"].map(vid_map)
-    df["ips"]   = df["is_rand"].apply(lambda r: 1.0 if r == 1 else 0.9963)
+    # Filter to users/videos in the id maps
+    mask = df["user_id"].isin(uid_map) & df["video_id"].isin(vid_map)
+    df   = df[mask].reset_index(drop=True)
 
-    df     = df.sort_values("time_ms").reset_index(drop=True)
+    # Map ids to contiguous integers in-place (avoids extra columns)
+    df["u_idx"] = df["user_id"].map(uid_map).astype(np.int32)
+    df["v_idx"] = df["video_id"].map(vid_map).astype(np.int32)
+    df["ips"]   = np.where(df["is_rand"].values == 1,
+                           np.float32(1.0), np.float32(0.9963))
+
+    # Free the large string/int64 columns we no longer need before sorting
+    df.drop(columns=["user_id", "video_id", "is_rand"], inplace=True)
+
+    df = df.sort_values("time_ms").reset_index(drop=True)
     cutoff = int(len(df) * (1 - test_ratio))
     cols   = ["u_idx", "v_idx", "session_id", "ips", "is_click"]
 
     train_arr = df.iloc[:cutoff][cols].values.astype(np.float32)
     test_arr  = df.iloc[cutoff:][cols].values.astype(np.float32)
+
+    # Free df before returning — caller only needs the numpy arrays
+    del df
 
     logger.info("Temporal split  train=%s  test=%s",
                 f"{len(train_arr):,}", f"{len(test_arr):,}")
@@ -360,7 +378,7 @@ def build_model(data: KuaiRandData, bundle: HKGBundle,
         out_dim        = out_dim,
         num_layers     = 2,
     )
-    align = AlignmentModule(emb_dim=out_dim, kg_relation_dim=args.kg-alignment, num_heads=4)
+    align = AlignmentModule(emb_dim=out_dim, kg_relation_dim=parse_args().kg_alignment, num_heads=4)
     head  = CVRHead(fused_dim=out_dim, hidden_dims=[hidden_dim, hidden_dim // 2])
 
     model    = KuaiCVRModel(struct, seq, align, head).to(device)
@@ -976,7 +994,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--cache-dir",  type=str, default=None,
                    help="Directory for HKG cache and model checkpoint. "
                         "Defaults to ./cache/<scale>. Set to 'none' to disable.")
-    p.add_argument("--output-dir", type=str, default="../runs",
+    p.add_argument("--output-dir", type=str, default="./runs",
                    help="Directory for metrics JSON and training history")
     p.add_argument("--scale",      type=str, default="1k", choices=["1k", "27k"],
                    help="Dataset scale — used for file naming only")
@@ -998,6 +1016,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max-seq-len",      type=int,   default=50)
 
     # Model
+    p.add_argument("--kg-alignment", type=int, default=0)
     p.add_argument("--hidden-dim",  type=int, default=128)
     p.add_argument("--out-dim",     type=int, default=64)
     p.add_argument("--model-type",  type=str, default="dual",
@@ -1005,7 +1024,6 @@ def parse_args() -> argparse.Namespace:
                    help="dual: R-GCN + SR-GNN + alignment (proposed). "
                         "single: HGT over full HKG, no alignment (baseline).")
 
-    p.add_argument("--kg-alignment", type=int, default=0)
     # Training
     p.add_argument("--epochs",       type=int,   default=10)
     p.add_argument("--batch-size",   type=int,   default=2048)
@@ -1102,6 +1120,7 @@ def main() -> None:
                               batch_size=args.batch_size, shuffle=True,  **dl_kwargs)
     test_loader  = DataLoader(InteractionDataset(test_arr),
                               batch_size=args.batch_size * 2, shuffle=False, **dl_kwargs)
+    del train_arr, test_arr   # numpy arrays are now inside the DataLoaders
 
     # ── 3. HKG — load from cache or build ────────────────────────────────────
     tqdm.write("[3/5] Preparing HKG …")
@@ -1119,6 +1138,16 @@ def main() -> None:
             save_hkg(bundle, cache_dir)
     else:
         tqdm.write(f"      Loaded from cache  n_videos={bundle.n_videos:,}  n_sessions={bundle.n_sessions:,}")
+
+    # Free large DataFrames — no longer needed after HKG is built
+    # log_standard alone is ~12 GB on 27K; freeing it here recovers
+    # that RAM for the HKG graph tensors and embedding matrices
+    import gc
+    data.log_standard  = None
+    data.log_random    = None
+    data.log_combined  = None
+    data.session_map   = None
+    gc.collect()
 
     sg = bundle.structural_graph
     qg = bundle.sequential_graph
