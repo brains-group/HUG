@@ -29,7 +29,8 @@ DIN_kuairand_1k:
     dataset_id: kuairand_1k
 
     loss: binary_crossentropy
-    metrics: [logloss, AUC]
+    metrics: [logloss, AUC, AP, "NDCG(10)"]
+    group_id: user_id
     task: binary_classification
     optimizer: adam
     learning_rate: 1.0e-3
@@ -74,7 +75,8 @@ BST_kuairand_1k:
     dataset_id: kuairand_1k
 
     loss: binary_crossentropy
-    metrics: [logloss, AUC]
+    metrics: [logloss, AUC, AP, "NDCG(10)"]
+    group_id: user_id
     task: binary_classification
     optimizer: adam
     learning_rate: 1.0e-3
