@@ -1,4 +1,4 @@
-# GCIC — Graph-based CTR Prediction with Heterogeneous Knowledge Graphs
+# HUG — Graph-based CVR Prediction with Heterogeneous Unified Knowledge Graphs
 
 A video recommendation system that predicts Click-Through Rate (CVR) on the [KuaiRand](https://kuairand.com/) dataset. Implements both baseline models (DIN, BST) and a novel **dual-GNN architecture** with Knowledge Graph alignment.
 
