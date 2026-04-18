@@ -205,16 +205,18 @@ class SequentialGNN(nn.Module):
 
     def __init__(
         self,
-        video_feat_dim: int,
-        hidden_dim:     int = 128,
-        out_dim:        int = 64,
-        num_layers:     int = 3,
-        dropout:        float = 0.2,
+        video_feat_dim:    int,
+        hidden_dim:        int = 128,
+        out_dim:           int = 64,
+        num_layers:        int = 3,
+        dropout:           float = 0.2,
+        use_recency_gate:  bool = True,
     ) -> None:
         super().__init__()
-        self.hidden_dim = hidden_dim
-        self.out_dim    = out_dim
-        self.dropout    = dropout
+        self.hidden_dim       = hidden_dim
+        self.out_dim          = out_dim
+        self.dropout          = dropout
+        self.use_recency_gate = use_recency_gate
 
         # Input projection
         self.input_proj = nn.Linear(video_feat_dim, hidden_dim)
@@ -321,10 +323,9 @@ class SequentialGNN(nn.Module):
         session_emb = torch.stack(session_emb_list, dim=0)   # [n_sessions, hidden_dim]
         last_item   = torch.stack(last_item_list,   dim=0)   # [n_sessions, hidden_dim]
 
-        # Recency gate: blend attention readout with last-item embedding
-        # Compute gate once to avoid calling recency_gate twice on the same input
-        gate        = torch.sigmoid(self.recency_gate(torch.cat([session_emb, last_item], dim=-1)))
-        session_emb = gate * session_emb + (1.0 - gate) * last_item
+        if self.use_recency_gate:
+            gate        = torch.sigmoid(self.recency_gate(torch.cat([session_emb, last_item], dim=-1)))
+            session_emb = gate * session_emb + (1.0 - gate) * last_item
 
         return session_emb
 
@@ -394,11 +395,13 @@ class SingleHGT(nn.Module):
         num_heads:         int   = 4,
         num_layers:        int   = 2,
         dropout:           float = 0.2,
+        use_recency_gate:  bool  = True,
     ) -> None:
         super().__init__()
-        self.hidden_dim = hidden_dim
-        self.out_dim    = out_dim
-        self.dropout    = dropout
+        self.hidden_dim       = hidden_dim
+        self.out_dim          = out_dim
+        self.dropout          = dropout
+        self.use_recency_gate = use_recency_gate
         assert hidden_dim % num_heads == 0, "hidden_dim must be divisible by num_heads"
 
         # ── Input projections (same as StructuralGNN) ─────────────────────────
@@ -549,9 +552,11 @@ class SingleHGT(nn.Module):
 
         sess_emb  = torch.stack(sess_list, dim=0)
         last_item = torch.stack(last_list, dim=0)
-        gate      = torch.sigmoid(self.recency_gate(
-            torch.cat([sess_emb, last_item], dim=-1)))
-        return gate * sess_emb + (1.0 - gate) * last_item
+        if self.use_recency_gate:
+            gate      = torch.sigmoid(self.recency_gate(
+                torch.cat([sess_emb, last_item], dim=-1)))
+            sess_emb  = gate * sess_emb + (1.0 - gate) * last_item
+        return sess_emb
 
 
 class _HGTLayer(nn.Module):

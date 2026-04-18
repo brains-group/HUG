@@ -204,17 +204,43 @@ class Metrics:
         )
 
 
-def _ndcg_at_k(labels: np.ndarray, scores: np.ndarray, k: int = 10) -> float:
-    if len(labels) < k:
-        return 0.0
-    try:
-        return float(ndcg_score(labels.reshape(1, -1), scores.reshape(1, -1), k=k))
-    except Exception:
-        return 0.0
+def _per_user_ndcg_at_k(
+    user_idxs: np.ndarray,
+    labels:    np.ndarray,
+    scores:    np.ndarray,
+    k:         int = 10,
+) -> float:
+    """
+    Compute NDCG@k averaged over users.
+
+    Only users with ≥2 interactions and at least one positive label contribute
+    to the average. Users with a single interaction trivially achieve 1.0 and
+    would inflate the metric; users with no positives have undefined NDCG.
+    """
+    unique_users = np.unique(user_idxs)
+    per_user_ndcg: list[float] = []
+
+    for uid in unique_users:
+        mask  = user_idxs == uid
+        u_lbl = labels[mask]
+        u_scr = scores[mask]
+
+        if u_lbl.sum() == 0 or len(u_lbl) < 2:
+            continue
+
+        try:
+            n = min(k, len(u_lbl))
+            score = float(ndcg_score(u_lbl.reshape(1, -1), u_scr.reshape(1, -1), k=n))
+            per_user_ndcg.append(score)
+        except Exception:
+            continue
+
+    return float(np.mean(per_user_ndcg)) if per_user_ndcg else 0.0
 
 
 def compute_metrics(split: str, labels: np.ndarray,
-                    probas: np.ndarray, loss: float) -> Metrics:
+                    probas: np.ndarray, loss: float,
+                    user_idxs: np.ndarray | None = None) -> Metrics:
     m = Metrics(split=split, loss=loss,
                 n_samples=len(labels), n_pos=int(labels.sum()))
     if m.n_pos == 0 or m.n_pos == m.n_samples:
@@ -223,7 +249,8 @@ def compute_metrics(split: str, labels: np.ndarray,
     m.auc     = float(roc_auc_score(labels, probas))
     m.ap      = float(average_precision_score(labels, probas))
     m.logloss = float(log_loss(labels, probas))
-    m.ndcg10  = _ndcg_at_k(labels, probas, k=10)
+    if user_idxs is not None:
+        m.ndcg10 = _per_user_ndcg_at_k(user_idxs, labels, probas, k=10)
     return m
 
 
@@ -345,7 +372,10 @@ def build_relation_edge_index(
 
 def build_model(data: KuaiRandData, bundle: HKGBundle,
                 hidden_dim: int, out_dim: int,
-                device: torch.device) -> KuaiCVRModel:
+                device: torch.device,
+                kg_alignment: int = 0,
+                use_recency_gate: bool = True,
+                num_layers: int = 2) -> KuaiCVRModel:
 
     sg = bundle.structural_graph
 
@@ -370,15 +400,16 @@ def build_model(data: KuaiRandData, bundle: HKGBundle,
         hidden_dim        = hidden_dim,
         out_dim           = out_dim,
         num_relations     = 7,
-        num_layers        = 2,
+        num_layers        = num_layers,
     )
     seq = SequentialGNN(
-        video_feat_dim = video_feat_dim,
-        hidden_dim     = hidden_dim,
-        out_dim        = out_dim,
-        num_layers     = 2,
+        video_feat_dim   = video_feat_dim,
+        hidden_dim       = hidden_dim,
+        out_dim          = out_dim,
+        num_layers       = num_layers,
+        use_recency_gate = use_recency_gate,
     )
-    align = AlignmentModule(emb_dim=out_dim, kg_relation_dim=parse_args().kg_alignment, num_heads=4)
+    align = AlignmentModule(emb_dim=out_dim, kg_relation_dim=kg_alignment, num_heads=4)
     head  = CVRHead(fused_dim=out_dim, hidden_dims=[hidden_dim, hidden_dim // 2])
 
     model    = KuaiCVRModel(struct, seq, align, head).to(device)
@@ -435,7 +466,9 @@ def build_full_relation_edge_index(
 
 def build_single_model(data: KuaiRandData, bundle: HKGBundle,
                         hidden_dim: int, out_dim: int,
-                        device: torch.device) -> SingleGNNModel:
+                        device: torch.device,
+                        use_recency_gate: bool = True,
+                        num_layers: int = 2) -> SingleGNNModel:
     """Build the single-HGT baseline model."""
     fg = bundle.full_graph
 
@@ -460,7 +493,8 @@ def build_single_model(data: KuaiRandData, bundle: HKGBundle,
         hidden_dim        = hidden_dim,
         out_dim           = out_dim,
         num_heads         = 4,
-        num_layers        = 2,
+        num_layers        = num_layers,
+        use_recency_gate  = use_recency_gate,
     )
     # CVR head input is out_dim * 2 (user cat video, no alignment module)
     head = CVRHead(fused_dim=out_dim * 2, hidden_dims=[hidden_dim, hidden_dim // 2])
@@ -895,6 +929,7 @@ def run_epoch(
     scaler:    torch.cuda.amp.GradScaler | None,
     split:     str,
     use_amp:   bool,
+    no_ips:    bool = False,
 ) -> Metrics:
     """
     One pass over the DataLoader using pre-computed graph embeddings.
@@ -912,7 +947,7 @@ def run_epoch(
     # Move embedding matrices to head device once for the whole epoch
     emb_dev = {k: v.to(head_dev, non_blocking=True) for k, v in emb.items()}
 
-    total_loss, all_labels, all_probas = 0.0, [], []
+    total_loss, all_labels, all_probas, all_users = 0.0, [], [], []
     n_seen  = 0
     ctx     = torch.enable_grad() if is_train else torch.no_grad()
     bar_fmt = "{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining} {rate_fmt}] {postfix}"
@@ -933,6 +968,9 @@ def run_epoch(
             session_idx = batch["session_idx"].to(head_dev, non_blocking=True).clamp(0, n_sess - 1)
             ips_weights = batch["ips_weight"].to(head_dev, non_blocking=True)
             labels      = batch["label"].to(head_dev, non_blocking=True)
+
+            if no_ips:
+                ips_weights = torch.ones_like(ips_weights)
 
             with torch.autocast(device_type=head_dev.type, enabled=use_amp):
                 out = model.forward_from_embeddings(
@@ -962,8 +1000,9 @@ def run_epoch(
             n_seen     += n
             running_loss = total_loss / max(n_seen, 1)
 
-            all_labels.append(batch["label"].numpy())
+            all_labels.append(batch["label"].cpu().numpy())
             all_probas.append(out["proba"].detach().cpu().float().numpy())
+            all_users.append(batch["user_idx"].cpu().numpy())
 
             postfix: dict = {"loss": f"{running_loss:.4f}"}
             if torch.cuda.is_available():
@@ -974,10 +1013,11 @@ def run_epoch(
     # Free GPU embedding copies
     del emb_dev
 
-    labels_np = np.concatenate(all_labels)
-    probas_np = np.concatenate(all_probas)
-    avg_loss  = total_loss / max(len(labels_np), 1)
-    return compute_metrics(split, labels_np, probas_np, avg_loss)
+    labels_np    = np.concatenate(all_labels)
+    probas_np    = np.concatenate(all_probas)
+    user_idxs_np = np.concatenate(all_users)
+    avg_loss     = total_loss / max(len(labels_np), 1)
+    return compute_metrics(split, labels_np, probas_np, avg_loss, user_idxs=user_idxs_np)
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
@@ -1023,6 +1063,17 @@ def parse_args() -> argparse.Namespace:
                    choices=["dual", "single"],
                    help="dual: R-GCN + SR-GNN + alignment (proposed). "
                         "single: HGT over full HKG, no alignment (baseline).")
+
+    # Ablation flags
+    p.add_argument("--no-ips", action="store_true",
+                   help="Disable IPS weighting; use uniform weights (ablation).")
+    p.add_argument("--no-recency-gate", action="store_true",
+                   help="Disable recency gate in SequentialGNN (ablation).")
+    p.add_argument("--gnn-layers", type=int, default=2,
+                   help="Number of message-passing layers in both GNN encoders.")
+    p.add_argument("--run-tag", type=str, default=None,
+                   help="Optional suffix appended to the run name for labelling "
+                        "hyperparameter-sensitivity runs (e.g. 'layers3').")
 
     # Training
     p.add_argument("--epochs",       type=int,   default=10)
@@ -1074,6 +1125,44 @@ def resolve_cache_dir(args: argparse.Namespace) -> Path | None:
     return Path(base)
 
 
+def make_run_name(args: argparse.Namespace) -> str:
+    """
+    Build a canonical run-name string encoding every flag that changes the
+    model or training objective, so results from different runs never collide.
+
+    Base format: {scale}_{model_type}_kg{kg}_ips{0|1}_rg{0|1}
+    Non-default layers appended as:  _L{n}
+    Non-default dims appended as:    _h{hidden}d{out}
+    Optional free-text tag appended: _{run_tag}
+
+    Examples
+    --------
+    1k_dual_kg64_ips1_rg1           → full model, default hypers
+    1k_dual_kg64_ips0_rg1           → no IPS
+    1k_dual_kg64_ips1_rg0           → no recency gate
+    1k_dual_kg64_ips1_rg1_L1        → 1 GNN layer
+    1k_dual_kg64_ips1_rg1_h256d128  → large embedding
+    """
+    ips_flag = "0" if getattr(args, "no_ips", False)          else "1"
+    rg_flag  = "0" if getattr(args, "no_recency_gate", False) else "1"
+    kg_dim   = getattr(args, "kg_alignment", 0)
+    name     = f"{args.scale}_{args.model_type}_kg{kg_dim}_ips{ips_flag}_rg{rg_flag}"
+
+    layers = getattr(args, "gnn_layers", 2)
+    hidden = getattr(args, "hidden_dim", 128)
+    out    = getattr(args, "out_dim",    64)
+    if layers != 2:
+        name += f"_L{layers}"
+    if hidden != 128 or out != 64:
+        name += f"_h{hidden}d{out}"
+
+    tag = getattr(args, "run_tag", None)
+    if tag:
+        name += f"_{tag}"
+
+    return name
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -1097,6 +1186,9 @@ def main() -> None:
     print(f"║  batch     : {args.batch_size:<46} ║")
     print(f"║  max_edges : {args.max_edges:<46} ║")
     print(f"║  hidden    : {args.hidden_dim}  out: {args.out_dim:<40} ║")
+    print(f"║  run_name  : {make_run_name(args):<46} ║")
+    print(f"║  no_ips    : {str(args.no_ips):<46} ║")
+    print(f"║  no_rg     : {str(args.no_recency_gate):<46} ║")
     print("╚" + "═" * 60 + "╝")
     print()
 
@@ -1172,14 +1264,20 @@ def main() -> None:
     # ── 4. Build model ────────────────────────────────────────────────────────
     tqdm.write(f"[4/5] Building model  (type={args.model_type}) …")
 
+    use_rg = not args.no_recency_gate
     if args.model_type == "single":
-        model = build_single_model(data, bundle, args.hidden_dim, args.out_dim, device)
+        model = build_single_model(data, bundle, args.hidden_dim, args.out_dim, device,
+                                   use_recency_gate=use_rg,
+                                   num_layers=args.gnn_layers)
         # Single model needs the full graph + full edge index
         full_rel_ei, full_rel_t = build_full_relation_edge_index(
             bundle, device, args.max_edges)
         tqdm.write(f"      Full HKG edges: {full_rel_ei.shape[1]:,}")
     else:
-        model = build_model(data, bundle, args.hidden_dim, args.out_dim, device)
+        model = build_model(data, bundle, args.hidden_dim, args.out_dim, device,
+                            kg_alignment=args.kg_alignment,
+                            use_recency_gate=use_rg,
+                            num_layers=args.gnn_layers)
 
     if args.multi_gpu:
         if not torch.cuda.is_available() or torch.cuda.device_count() < 2:
@@ -1258,12 +1356,12 @@ def main() -> None:
             train_m = run_epoch(
                 model, train_loader, emb, n_sess,
                 device, optimizer, scaler,
-                split="train", use_amp=use_amp,
+                split="train", use_amp=use_amp, no_ips=args.no_ips,
             )
             test_m = run_epoch(
                 model, test_loader, emb, n_sess,
                 device, None, None,
-                split="test", use_amp=use_amp,
+                split="test", use_amp=use_amp, no_ips=args.no_ips,
             )
             del emb   # free CPU embedding matrices between epochs
             scheduler.step()
@@ -1305,7 +1403,7 @@ def main() -> None:
         epoch_bar.close()
 
         # Save history
-        out_dir = Path(args.output_dir) / f"kuairand_{args.scale}_{args.model_type}"
+        out_dir = Path(args.output_dir) / make_run_name(args)
         out_dir.mkdir(parents=True, exist_ok=True)
         (out_dir / "history.json").write_text(json.dumps(history, indent=2))
         logger.info("Training history -> %s", out_dir / "history.json")
@@ -1334,12 +1432,12 @@ def main() -> None:
     final_train = run_epoch(
         model, train_loader, emb_final, n_sess,
         device, None, None,
-        split="train", use_amp=use_amp,
+        split="train", use_amp=use_amp, no_ips=args.no_ips,
     )
     final_test = run_epoch(
         model, test_loader, emb_final, n_sess,
         device, None, None,
-        split="test ", use_amp=use_amp,
+        split="test ", use_amp=use_amp, no_ips=args.no_ips,
     )
     del emb_final
 
