@@ -128,26 +128,26 @@ def load_hkg(cache_dir: Path) -> HKGBundle | None:
 
 
 def save_checkpoint(model, args: argparse.Namespace,
-                    best_auc: float, cache_dir: Path) -> None:
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    ckpt_path = cache_dir / _ckpt_filename(args.model_type)
+                    best_auc: float, out_dir: Path) -> None:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    ckpt_path = out_dir / _ckpt_filename(args.model_type)
     torch.save({
         "model_state": {k: v.cpu() for k, v in model.state_dict().items()},
         "best_auc":    best_auc,
         "args":        vars(args),
         "model_type":  args.model_type,
     }, ckpt_path)
-    (cache_dir / ARGS_CACHE_FILE).write_text(json.dumps(vars(args), indent=2))
+    (out_dir / ARGS_CACHE_FILE).write_text(json.dumps(vars(args), indent=2))
     logger.info("Checkpoint saved -> %s  (AUC=%.4f)", ckpt_path, best_auc)
 
 
 def load_checkpoint(model, device: torch.device,
-                    cache_dir: Path, model_type: str = "dual") -> float:
+                    out_dir: Path, model_type: str = "dual") -> float:
     """Load best checkpoint into model in-place. Returns best_auc or 0."""
-    ckpt_path = cache_dir / _ckpt_filename(model_type)
+    ckpt_path = out_dir / _ckpt_filename(model_type)
     if not ckpt_path.exists():
         return 0.0
-    ckpt = torch.load(ckpt_path, map_location=device)
+    ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
     model.load_state_dict({k: v.to(device) for k, v in ckpt["model_state"].items()})
     auc = float(ckpt.get("best_auc", 0.0))
     logger.info("Checkpoint loaded from %s  (AUC=%.4f)", ckpt_path, auc)
@@ -1299,13 +1299,18 @@ def main() -> None:
             sess_id = sess_id.to(f"cuda:{args.gpu_sequential}")
 
     # AMP scaler (no-op on non-CUDA)
-    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
 
-    # Load checkpoint if eval-only or if one exists
+    # Each run gets its own output + checkpoint directory (avoids cross-run
+    # checkpoint collisions when two runs share the same cache_dir).
+    out_dir = Path(args.output_dir) / make_run_name(args)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Load checkpoint if eval-only or if a prior run left one
     best_auc = 0.0
-    ckpt_file = cache_dir / _ckpt_filename(args.model_type) if cache_dir else None
-    if cache_dir and (args.eval_only or (ckpt_file and ckpt_file.exists())):
-        loaded_auc = load_checkpoint(model, device, cache_dir, args.model_type)
+    ckpt_file = out_dir / _ckpt_filename(args.model_type)
+    if args.eval_only or ckpt_file.exists():
+        loaded_auc = load_checkpoint(model, device, out_dir, args.model_type)
         if args.eval_only:
             best_auc = loaded_auc
 
@@ -1396,15 +1401,12 @@ def main() -> None:
 
             if test_m.auc > best_auc:
                 best_auc = test_m.auc
-                if cache_dir:
-                    save_checkpoint(model, args, best_auc, cache_dir)
+                save_checkpoint(model, args, best_auc, out_dir)
                 tqdm.write(f"  ★ new best test AUC={best_auc:.4f}  (checkpoint saved)")
 
         epoch_bar.close()
 
         # Save history
-        out_dir = Path(args.output_dir) / make_run_name(args)
-        out_dir.mkdir(parents=True, exist_ok=True)
         (out_dir / "history.json").write_text(json.dumps(history, indent=2))
         logger.info("Training history -> %s", out_dir / "history.json")
 

@@ -36,7 +36,7 @@ DATA_DIR=""
 EPOCHS=20
 BATCH=2048
 DEVICE=""          # leave empty to auto-detect (cuda > mps > cpu)
-CACHE_DIR="./cache/1k"
+CACHE_DIR="Framework/cache/1K"
 OUT_DIR="./runs"
 SEED=42
 KG_DIM=64          # kg_relation_dim used when KGA is ON (must match out_dim)
@@ -114,23 +114,23 @@ run() {
 }
 
 # run_kgat: launch a Baselines/KGAT/train_kgat.py experiment
-run_kgat() {
-    local label="$1"; shift
-    echo ""
-    echo "════════════════════════════════════════════════════════════"
-    echo "  STARTING: $label"
-    echo "════════════════════════════════════════════════════════════"
-    python "$KGAT_DIR/train_kgat.py" \
-        --data-dir  "$DATA_DIR" \
-        --cache-dir "$CACHE_DIR" \
-        --out-dir   "$OUT_DIR" \
-        --epochs    "$EPOCHS" \
-        --batch-size "$BATCH" \
-        --seed      "$SEED" \
-        $DEVICE_ARG \
-        "$@"
-    echo "  DONE: $label"
-}
+# run_kgat() {
+#     local label="$1"; shift
+#     echo ""
+#     echo "════════════════════════════════════════════════════════════"
+#     echo "  STARTING: $label"
+#     echo "════════════════════════════════════════════════════════════"
+#     python "$KGAT_DIR/train_kgat.py" \
+#         --data-dir  "$DATA_DIR" \
+#         --cache-dir "$CACHE_DIR" \
+#         --out-dir   "$OUT_DIR" \
+#         --epochs    "$EPOCHS" \
+#         --batch-size "$BATCH" \
+#         --seed      "$SEED" \
+#         $DEVICE_ARG \
+#         "$@"
+#     echo "  DONE: $label"
+# }
 
 # =============================================================================
 # [A] KGAT baseline  (structural KG attention, no sequential encoder)
@@ -138,18 +138,18 @@ run_kgat() {
 
 # A1 — KGAT with IPS weighting on (fair comparison to HUG full model)
 #      run_name: 1k_kgat_ips1_L2_h128d64
-in_group 0 && run_kgat "A1  KGAT baseline  (IPS on)" \
-    --hidden-dim 128 \
-    --out-dim    64  \
-    --n-layers   2
+# in_group 0 && run_kgat "A1  KGAT baseline  (IPS on)" \
+#     --hidden-dim 128 \
+#     --out-dim    64  \
+#     --n-layers   2
 
-# A2 — KGAT with IPS off  (matches the DIN/BST training objective)
-#      run_name: 1k_kgat_ips0_L2_h128d64
-in_group 0 && run_kgat "A2  KGAT baseline  (IPS off)" \
-    --hidden-dim 128 \
-    --out-dim    64  \
-    --n-layers   2   \
-    --no-ips
+# # A2 — KGAT with IPS off  (matches the DIN/BST training objective)
+# #      run_name: 1k_kgat_ips0_L2_h128d64
+# in_group 0 && run_kgat "A2  KGAT baseline  (IPS off)" \
+#     --hidden-dim 128 \
+#     --out-dim    64  \
+#     --n-layers   2   \
+#     --no-ips
 
 # =============================================================================
 # [B] Main model progression  (all use IPS=on, recency-gate=on)
@@ -157,9 +157,9 @@ in_group 0 && run_kgat "A2  KGAT baseline  (IPS off)" \
 
 # B1 — HUG-Unified: single HGT over full HKG, no KG alignment
 #      run_name: 1k_single_kg0_ips1_rg1
-in_group 0 && run "B1  HUG-Unified  (single HGT, no KGA)" \
-    --model-type single \
-    --kg-alignment 0
+# in_group 0 && run "B1  HUG-Unified  (single HGT, no KGA)" \
+#     --model-type single \
+#     --kg-alignment 0
 
 # B2 — HUG-Dual (KGA Off): dual GNN + cross-attention, no KG gate
 #      run_name: 1k_dual_kg0_ips1_rg1

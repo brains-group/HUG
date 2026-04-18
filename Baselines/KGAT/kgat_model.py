@@ -94,11 +94,15 @@ class KGATLayer(nn.Module):
         H = self.H
 
         # ── Relational projection of source embeddings ────────────────────────
-        # W_r[rel_types] : [E, H, H]   (one matrix per edge, indexed by rel id)
-        # h[src]         : [E, H]
-        # einsum 'eij,ej->ei': for edge e, output[e,i] = Σ_j W_r[e,i,j]*h[src[e],j]
-        # → each row is W_r[rel_e] @ h_src_e                             [E, H]
-        h_proj = torch.einsum('eij,ej->ei', self.W_r[rel_types], h[src])   # [E, H]
+        # Naive W_r[rel_types] gathers [E, H, H] — fatal OOM for large E.
+        # Instead loop over R relation types: each slice is [E_r, H] @ [H, H].
+        # Peak extra memory: max(E_r) × H × 4B, not E × H × H × 4B.
+        h_proj = torch.zeros(h[src].shape, dtype=h.dtype, device=h.device)  # [E, H]
+        for r in range(self.W_r.shape[0]):
+            mask = rel_types == r
+            if mask.any():
+                # h[src[mask]] : [E_r, H]   W_r[r].T : [H, H]
+                h_proj[mask] = h[src[mask]] @ self.W_r[r].t()   # [E_r, H]
 
         # ── Attention scores ──────────────────────────────────────────────────
         # Inner product of projected source with destination embedding
