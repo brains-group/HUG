@@ -31,7 +31,7 @@ A **KG-guided cross-attention alignment module** fuses both representations befo
 ## Project Structure
 
 ```
-GCIC/
+HUG/
 ├── Framework/              # Dual-GNN model (main codebase)
 │   ├── main.py             # Training & evaluation entry point
 │   ├── data_loader.py      # KuaiRand CSV loader
