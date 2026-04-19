@@ -163,15 +163,15 @@ run() {
 
 # B2 — HUG-Dual (KGA Off): dual GNN + cross-attention, no KG gate
 #      run_name: 1k_dual_kg0_ips1_rg1
-in_group 0 && run "B2  HUG-Dual (KGA Off)" \
-    --model-type dual \
-    --kg-alignment 0
+# in_group 0 && run "B2  HUG-Dual (KGA Off)" \
+#     --model-type dual \
+#     --kg-alignment 0
 
-# B3 — HUG-Dual (KGA On): full model
-#      run_name: 1k_dual_kg64_ips1_rg1
-in_group 0 && run "B3  HUG-Dual (KGA On)  [FULL MODEL]" \
-    --model-type dual \
-    --kg-alignment $KG_DIM
+# # B3 — HUG-Dual (KGA On): full model
+# #      run_name: 1k_dual_kg64_ips1_rg1
+# in_group 0 && run "B3  HUG-Dual (KGA On)  [FULL MODEL]" \
+#     --model-type dual \
+#     --kg-alignment $KG_DIM
 
 # =============================================================================
 # [C] IPS ablation  (full model, IPS disabled)
@@ -179,68 +179,71 @@ in_group 0 && run "B3  HUG-Dual (KGA On)  [FULL MODEL]" \
 
 # C1 — Full model, IPS off
 #      run_name: 1k_dual_kg64_ips0_rg1
-in_group 1 && run "C1  Ablation: no IPS  (full model)" \
-    --model-type dual \
-    --kg-alignment $KG_DIM \
-    --no-ips
-
+# in_group 1 && run "C1  Ablation: no IPS  (full model)" \
+#     --model-type dual \
+#     --kg-alignment $KG_DIM \
+#     --no-ips
+ in_group 0 && run "B2  HUG-Unified  (single HGT, no KGA)" \
+     --model-type single \
+     --kg-alignment 0 \
+     --no-ips
 # =============================================================================
 # [D] Recency-gate ablation  (full model, recency gate disabled)
 # =============================================================================
 
 # D1 — Full model, recency gate off
 #      run_name: 1k_dual_kg64_ips1_rg0
-in_group 1 && run "D1  Ablation: no recency gate  (full model)" \
-    --model-type dual \
-    --kg-alignment $KG_DIM \
-    --no-recency-gate
+# in_group 1 && run "D1  Ablation: no recency gate  (full model)" \
+#     --model-type dual \
+#     --kg-alignment $KG_DIM \
+#     --no-recency-gate
 
-# =============================================================================
-# [E] Combined ablation  (IPS off + recency gate off)
-# =============================================================================
+# # =============================================================================
+# # [E] Combined ablation  (IPS off + recency gate off)
+# # =============================================================================
 
-# E1 — Full model, no IPS, no recency gate
-#      run_name: 1k_dual_kg64_ips0_rg0
-in_group 1 && run "E1  Ablation: no IPS + no recency gate" \
-    --model-type dual \
-    --kg-alignment $KG_DIM \
-    --no-ips \
-    --no-recency-gate
+# # E1 — Full model, no IPS, no recency gate
+# #      run_name: 1k_dual_kg64_ips0_rg0
+# in_group 1 && run "E1  Ablation: no IPS + no recency gate" \
+#     --model-type dual \
+#     --kg-alignment $KG_DIM \
+#     --no-ips \
+#     --no-recency-gate
 
-# =============================================================================
-# [F] Hyperparameter sensitivity  (full model: B3 config with varied hypers)
-# =============================================================================
+# # =============================================================================
+# # [F] Hyperparameter sensitivity  (full model: B3 config with varied hypers)
+# # =============================================================================
 
-# F1 — Shallow: 1 GNN layer
-#      run_name: 1k_dual_kg64_ips1_rg1_L1
-in_group 1 && run "F1  Sensitivity: 1 GNN layer" \
-    --model-type  dual \
-    --kg-alignment $KG_DIM \
-    --gnn-layers  1
+# # F1 — Shallow: 1 GNN layer
+# #      run_name: 1k_dual_kg64_ips1_rg1_L1
+# in_group 1 && run "F1  Sensitivity: 1 GNN layer" \
+#     --model-type  dual \
+#     --kg-alignment $KG_DIM \
+#     --gnn-layers  1
 
-# F2 — Deep: 3 GNN layers
-#      run_name: 1k_dual_kg64_ips1_rg1_L3
-in_group 1 && run "F2  Sensitivity: 3 GNN layers" \
-    --model-type  dual \
-    --kg-alignment $KG_DIM \
-    --gnn-layers  3
+# # F2 — Deep: 3 GNN layers
+# #      run_name: 1k_dual_kg64_ips1_rg1_L3
+# in_group 1 && run "F2  Sensitivity: 3 GNN layers" \
+#     --model-type  dual \
+#     --kg-alignment $KG_DIM \
+#     --gnn-layers  3
 
-# F3 — Small embeddings: hidden=64, out=32
-#      run_name: 1k_dual_kg32_ips1_rg1_h64d32
-#      Note: kg-alignment must equal out-dim for the alignment module to work
-in_group 1 && run "F3  Sensitivity: small dims  (hidden=64, out=32)" \
-    --model-type   dual \
-    --kg-alignment 32 \
-    --hidden-dim   64 \
-    --out-dim      32
+# # F3 — Small embeddings: hidden=64, out=32
+# #      run_name: 1k_dual_kg32_ips1_rg1_h64d32
+# #      Note: kg-alignment must equal out-dim for the alignment module to work
+# in_group 1 && run "F3  Sensitivity: small dims  (hidden=64, out=32)" \
+#     --model-type   dual \
+#     --kg-alignment 32 \
+#     --hidden-dim   64 \
+#     --out-dim      32
 
-# F4 — Large embeddings: hidden=256, out=128
-#      run_name: 1k_dual_kg128_ips1_rg1_h256d128
-in_group 1 && run "F4  Sensitivity: large dims  (hidden=256, out=128)" \
-    --model-type   dual \
-    --kg-alignment 128 \
-    --hidden-dim   256 \
-    --out-dim      128
+# # F4 — Large embeddings: hidden=256, out=128
+# #      run_name: 1k_dual_kg128_ips1_rg1_h256d128
+# in_group 1 && run "F4  Sensitivity: large dims  (hidden=256, out=128)" \
+#     --model-type   dual \
+#     --kg-alignment 128 \
+#     --hidden-dim   256 \
+#     --out-dim      128
 
 # =============================================================================
 # Summary

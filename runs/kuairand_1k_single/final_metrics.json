@@ -1,26 +1,26 @@
 {
   "train": {
     "split": "train",
-    "loss": 0.5735757134788554,
-    "auc": 0.744629290426988,
-    "ap": 0.632265387447275,
-    "logloss": 0.5735756675420609,
-    "ndcg10": 0.9159432810519308,
+    "loss": 0.5587032246246706,
+    "auc": 0.7623114940514228,
+    "ap": 0.6541725459076617,
+    "logloss": 0.5587033088079315,
+    "ndcg10": 0.8535535222572614,
     "n_samples": 9356988,
     "n_pos": 3546918
   },
   "test": {
     "split": "test ",
-    "loss": 0.5802895437831038,
-    "auc": 0.7305644041018546,
-    "ap": 0.6035936080279355,
-    "logloss": 0.5802887617343279,
-    "ndcg10": 0.800306955905747,
+    "loss": 0.5638348917998204,
+    "auc": 0.751449778311444,
+    "ap": 0.6312257056984178,
+    "logloss": 0.5638351775051837,
+    "ndcg10": 0.7784259231830182,
     "n_samples": 2339248,
     "n_pos": 867585
   },
   "args": {
-    "data_dir": "KuaiRand-1K/data",
+    "data_dir": "./KuaiRand-1K/data",
     "cache_dir": "Framework/cache/1K",
     "output_dir": "./runs",
     "scale": "1k",
@@ -36,7 +36,7 @@
     "hidden_dim": 128,
     "out_dim": 64,
     "model_type": "single",
-    "no_ips": false,
+    "no_ips": true,
     "no_recency_gate": false,
     "gnn_layers": 2,
     "run_tag": null,
@@ -50,5 +50,5 @@
     "max_edges": 200000,
     "chunk_size": 500000
   },
-  "best_auc": 0.7305644037071155
+  "best_auc": 0.7518597607224651
 }
