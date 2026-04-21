@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c ' *)",
+      "Bash(python plot_results.py)",
+      "WebSearch",
+      "WebFetch(domain:arxiv.org)"
+    ]
+  }
+}
