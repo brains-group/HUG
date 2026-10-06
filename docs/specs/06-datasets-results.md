@@ -47,7 +47,7 @@ tests (`--data-dir`) and the two `HUG_REAL_DATA=1` tests.
 | A2 contract | MIND, ZhihuRec and KuaiRand fixtures: dtypes, no null keys, sorted time, `label_time ≥ time`, every edge within its declared node types, links in range. |
 | A3 label timing | ZhihuRec fixture: `label_time` = max(click, impression) / impression + 900 s; history = brute-force known clicks for every row (the fixture has naive-visible clicks that are not yet known: `leaked > 0`); item show/click/CTR stats brute-forced; click/skip edges in a snapshot = rows with `label_time < boundary`; same-timestamp rows never see each other. |
 | A4 invariance | ZhihuRec fixture, HUG N4 with fixed weights: flipping the labels of 6 impressions with t < T ≤ label_time leaves every prediction before T unchanged; rewriting every row at or after T (labels, click times, answers) too; the rewritten rows' predictions change. |
-| A5 parity | HUG vs baseline frame on both fixtures, every row: history items, context, numeric features, labels, split, buckets. Real-data 5,000-row version: `HUG_REAL_DATA=1` (not run yet). |
+| A5 parity | HUG vs baseline frame on both fixtures, every row: history items, context, numeric features, labels, split, buckets. **Real data** (`HUG_REAL_DATA=1`): 5,000 random rows of MIND and of ZhihuRec, histories and every numeric feature identical: passed (7.7 min). |
 | A6 day_snap | MIND fixture: cutoffs at UTC midnights, splits exactly 11-09…13 / 11-14 / 11-15; Beijing-midnight snapping; Zhihu-shaped fallback. |
 | A7 subsample | deterministic, users fully in, stats computed within the sample (both adapters). |
 | A8 pre-window | tokens first, `PRE_WINDOW_GAP`, not same-session; in-window clicks appended once known; pre-window click edges present in snapshot 0. |
@@ -118,6 +118,12 @@ results split by seen/unseen item (the `video_train_count` bucket already does t
 KuaiRand-1K's master index is 28.4M edges. Skip edges dominate MIND's graph (82%); they are on
 by default (`--skip-edges`), and the GPU smoke will show whether they fit the time budget.
 
+### 3.5 Baseline CSVs
+
+`preprocess.py --dataset mind`: 4 min, 18.5 GB peak RSS, 4.6 GB of CSVs (train 12,545,976 /
+holdout 660,315 / valid 3,463,936 / test 2,832,473 rows). `--dataset zhihurec`: 3.7 min,
+19.9 GB, 2.8 GB (8,315,720 / 437,669 / 1,250,489 / 2,500,999). Both from the cached bundles.
+
 ## 4. Decisions made while implementing
 
 1. **ZhihuRec split falls back to the exact cut** (3.2); MIND uses day_snap.
@@ -150,5 +156,3 @@ by default (`--skip-edges`), and the GPU smoke will show whether they fit the ti
 - **Item 5**: 50-step queue dry run over the MIND/ZhihuRec entries, then aggregation.
 - **Item 6**: run-time estimate for the per-dataset plan and proposed cuts against the
   2026-10-21 results deadline.
-- `HUG_REAL_DATA=1` A5 parity on 5,000 real rows per dataset (CPU; runs once the CSV builds
-  finish).
