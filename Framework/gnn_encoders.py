@@ -406,6 +406,9 @@ class SingleHGT(nn.Module):
     num_layers : int
         HGT message-passing layers.
     dropout : float
+    num_edge_types : int | None
+        Edge-type count for the per-type projections; defaults to
+        len(EDGE_TYPES).  Pass NUM_EDGE_TYPES when reverse types are used.
     """
 
     # All edge types present in the full HKG
@@ -436,6 +439,7 @@ class SingleHGT(nn.Module):
         num_layers:        int   = 2,
         dropout:           float = 0.2,
         use_recency_gate:  bool  = True,
+        num_edge_types:    int | None = None,
     ) -> None:
         super().__init__()
         self.hidden_dim       = hidden_dim
@@ -458,7 +462,7 @@ class SingleHGT(nn.Module):
         # Each layer has per-edge-type and per-node-type projection matrices.
         # We implement a lightweight version: one W_Q, W_K, W_V per edge type,
         # shared node update MLP.
-        n_edge_types = len(self.EDGE_TYPES)
+        n_edge_types = num_edge_types or len(self.EDGE_TYPES)
         head_dim     = hidden_dim // num_heads
         self.num_heads = num_heads
         self.head_dim  = head_dim
@@ -603,6 +607,15 @@ class SingleHGT(nn.Module):
                 torch.cat([sess_emb, last_item], dim=-1)))
             sess_emb  = gate * sess_emb + (1.0 - gate) * last_item
         return sess_emb
+
+
+# Reverse of every HGT edge type except next_in_session (ordered by definition),
+# numbered after EDGE_TYPES
+SingleHGT.REVERSE_TYPE_IDS = {
+    et: len(SingleHGT.EDGE_TYPES) + i
+    for i, et in enumerate(e for e in SingleHGT.EDGE_TYPES if e[1] != "next_in_session")
+}
+SingleHGT.NUM_EDGE_TYPES = len(SingleHGT.EDGE_TYPES) + len(SingleHGT.REVERSE_TYPE_IDS)
 
 
 class _HGTLayer(nn.Module):

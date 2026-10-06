@@ -261,24 +261,27 @@ REL_MAP = {
 }
 
 
-def build_relation_edge_index(
-    sg:                 HeteroData,
+# Reverse relations: r + len(REL_MAP) carries the edges of r flipped, so
+# users and videos also receive messages (RGCNConv aggregates at the target).
+REVERSE_REL_MAP = {et: rid + len(REL_MAP) for et, rid in REL_MAP.items()}
+NUM_RELATIONS   = 2 * len(REL_MAP)
+
+
+def _merged_edge_index(
+    g:                  HeteroData,
+    forward_ids:        dict,
+    reverse_ids:        dict,
     device:             torch.device,
-    max_edges_per_type: int = 200_000,
+    max_edges_per_type: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
-    Build the merged (edge_index, relation_types) for RGCNConv ONCE using
-    the full graph with correct global node-index offsets.
-
-    Called once before the training loop and reused every epoch.
-    Never called per-batch — that was the source of the hang.
-
-    h_all layout inside StructuralGNN:
-        [user(0..n_user) | video(n_user..) | author(..) | category(..)]
+    Concatenate edge types into one global index for a homogeneous-style
+    encoder.  Node layout: [user | video | author | category].  Each type in
+    `reverse_ids` is also emitted flipped under its reverse id.
     """
-    n_user   = sg["user"].num_nodes
-    n_video  = sg["video"].num_nodes
-    n_author = sg["author"].num_nodes
+    n_user   = g["user"].num_nodes
+    n_video  = g["video"].num_nodes
+    n_author = g["author"].num_nodes
 
     offsets = {
         "user":     0,
@@ -288,10 +291,10 @@ def build_relation_edge_index(
     }
 
     parts, type_parts = [], []
-    for et, rel_id in REL_MAP.items():
-        if et not in sg.edge_types:
+    for et, type_id in forward_ids.items():
+        if et not in g.edge_types:
             continue
-        ei = sg[et].edge_index.cpu()
+        ei = g[et].edge_index.cpu()
         if ei.shape[1] > max_edges_per_type:
             idx = torch.randperm(ei.shape[1])[:max_edges_per_type]
             ei  = ei[:, idx]
@@ -299,7 +302,10 @@ def build_relation_edge_index(
         shifted[0] += offsets[et[0]]
         shifted[1] += offsets[et[2]]
         parts.append(shifted)
-        type_parts.append(torch.full((shifted.shape[1],), rel_id, dtype=torch.long))
+        type_parts.append(torch.full((shifted.shape[1],), type_id, dtype=torch.long))
+        if et in reverse_ids:
+            parts.append(shifted.flip(0))
+            type_parts.append(torch.full((shifted.shape[1],), reverse_ids[et], dtype=torch.long))
 
     if not parts:
         return (torch.zeros(2, 0, dtype=torch.long, device=device),
@@ -307,6 +313,21 @@ def build_relation_edge_index(
 
     return (torch.cat(parts,      dim=1).to(device),
             torch.cat(type_parts, dim=0).to(device))
+
+
+def build_relation_edge_index(
+    sg:                 HeteroData,
+    device:             torch.device,
+    max_edges_per_type: int = 200_000,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Merged (edge_index, relation_types) for the structural R-GCN: the
+    REL_MAP relations plus their reverses (NUM_RELATIONS in total).
+
+    h_all layout inside StructuralGNN:
+        [user(0..n_user) | video(n_user..) | author(..) | category(..)]
+    """
+    return _merged_edge_index(sg, REL_MAP, REVERSE_REL_MAP, device, max_edges_per_type)
 
 
 # ── Model factory ─────────────────────────────────────────────────────────────
@@ -340,7 +361,7 @@ def build_model(data: KuaiRandData, bundle: HKGBundle,
         category_feat_dim = 1,
         hidden_dim        = hidden_dim,
         out_dim           = out_dim,
-        num_relations     = 7,
+        num_relations     = NUM_RELATIONS,
         num_layers        = num_layers,
     )
     seq = SequentialGNN(
@@ -365,44 +386,13 @@ def build_full_relation_edge_index(
     max_edges_per_type: int = 200_000,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
-    Build a merged edge index over ALL HKG edge types for the single HGT.
-
-    Unlike build_relation_edge_index (structural only, 7 types), this includes
-    next_in_session edges so the HGT sees both structural and sequential signal
-    in one pass.  Edge type ids match SingleHGT.EDGE_TYPES ordering.
+    Merged edge index over ALL HKG edge types for the single HGT, plus the
+    reverse of every type except next_in_session (ordered by definition).
+    Type ids follow SingleHGT.EDGE_TYPES, then SingleHGT.REVERSE_TYPE_IDS.
     """
-    fg = bundle.full_graph
-    n_user   = fg["user"].num_nodes
-    n_video  = fg["video"].num_nodes
-    n_author = fg["author"].num_nodes
-
-    offsets = {
-        "user":     0,
-        "video":    n_user,
-        "author":   n_user + n_video,
-        "category": n_user + n_video + n_author,
-    }
-
-    parts, type_parts = [], []
-    for et_id, et in enumerate(SingleHGT.EDGE_TYPES):
-        if et not in fg.edge_types:
-            continue
-        ei = fg[et].edge_index.cpu()
-        if ei.shape[1] > max_edges_per_type:
-            idx = torch.randperm(ei.shape[1])[:max_edges_per_type]
-            ei  = ei[:, idx]
-        shifted    = ei.clone()
-        shifted[0] += offsets[et[0]]
-        shifted[1] += offsets[et[2]]
-        parts.append(shifted)
-        type_parts.append(torch.full((shifted.shape[1],), et_id, dtype=torch.long))
-
-    if not parts:
-        return (torch.zeros(2, 0, dtype=torch.long, device=device),
-                torch.zeros(0,    dtype=torch.long, device=device))
-
-    return (torch.cat(parts,      dim=1).to(device),
-            torch.cat(type_parts, dim=0).to(device))
+    forward_ids = {et: i for i, et in enumerate(SingleHGT.EDGE_TYPES)}
+    return _merged_edge_index(bundle.full_graph, forward_ids, SingleHGT.REVERSE_TYPE_IDS,
+                              device, max_edges_per_type)
 
 
 def build_single_model(data: KuaiRandData, bundle: HKGBundle,
@@ -436,6 +426,7 @@ def build_single_model(data: KuaiRandData, bundle: HKGBundle,
         num_heads         = 4,
         num_layers        = num_layers,
         use_recency_gate  = use_recency_gate,
+        num_edge_types    = SingleHGT.NUM_EDGE_TYPES,
     )
     # CVR head input is out_dim * 2 (user cat video, no alignment module)
     head = CVRHead(fused_dim=out_dim * 2, hidden_dims=[hidden_dim, hidden_dim // 2])
