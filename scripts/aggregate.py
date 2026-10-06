@@ -2,6 +2,11 @@
 Aggregate heavy-run outputs into summary tables (Spec 04, W4.3).
 
     python scripts/aggregate.py [--runs-root runs/heavy] [--n-boot 1000] [--reference N4]
+        [--dataset kuairand|mind|zhihurec]
+
+One dataset per call (job.json's ``dataset``, default kuairand); spec 06 groups are named
+``<group>@<dataset>`` in the plan and reported without the suffix.  Output goes to
+``<runs_root>/summary/`` (kuairand) or ``<runs_root>/summary_<dataset>/``.
 
 Reads ``<runs_root>/<job>/final_metrics.json`` (plus ``job.json`` written by the queue and
 ``val_preds.npz``) and writes into ``<runs_root>/summary/``:
@@ -65,23 +70,26 @@ def _read_json(path: Path) -> dict[str, Any]:
         return {}
 
 
-def load_runs(runs_root: Path) -> list[Run]:
-    """One Run per ``<runs_root>/<job>/final_metrics.json``, sorted by job name."""
+def load_runs(runs_root: Path, dataset: str = "kuairand") -> list[Run]:
+    """One Run per ``<runs_root>/<job>/final_metrics.json`` of `dataset`, sorted by job name."""
     runs = []
     for path in sorted(runs_root.glob("*/final_metrics.json")):
-        if path.parent.name == "summary":
+        if path.parent.name.startswith("summary"):
             continue
         metrics = _read_json(path)
         if not metrics:
             logger.warning("unreadable %s", path)
             continue
         meta = _read_json(path.parent / "job.json")
+        if (meta.get("dataset") or "kuairand") != dataset:
+            continue
         kind = meta.get("kind") or metrics.get("kind") or "unknown"
         if kind in TUNE_KINDS:
             continue
         model = meta.get("model") or metrics.get("model")
         arm = meta.get("arm") or metrics.get("arm")
         group = meta.get("group") or arm or model or path.parent.name
+        group = str(group).removesuffix(f"@{dataset}")
         seed = metrics.get("seed", meta.get("seed"))
         runs.append(Run(job=metrics.get("job") or path.parent.name, kind=kind, group=str(group),
                         model=model, arm=arm, seed=None if seed is None else int(seed),
@@ -407,12 +415,13 @@ def write_significance(groups: dict[str, list[Run]], reference: str, n_boot: int
 # ── Entry point ────────────────────────────────────────────────────────────────
 
 
-def aggregate(runs_root: Path, n_boot: int = 1000, reference: str = "N4") -> Path:
+def aggregate(runs_root: Path, n_boot: int = 1000, reference: str = "N4",
+              dataset: str = "kuairand") -> Path:
     """Write all summary files; returns the summary directory."""
-    runs = load_runs(runs_root)
+    runs = load_runs(runs_root, dataset)
     val_groups = by_group([r for r in runs if r.kind != "final_eval"])
     test_groups = by_group([r for r in runs if r.kind == "final_eval"])
-    out_dir = runs_root / "summary"
+    out_dir = runs_root / ("summary" if dataset == "kuairand" else f"summary_{dataset}")
     out_dir.mkdir(parents=True, exist_ok=True)
     write_val_table(val_groups, out_dir)
     write_bucket_tables(val_groups, out_dir)
@@ -430,8 +439,9 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--runs-root", type=Path, default=Path("runs/heavy"))
     p.add_argument("--n-boot", type=int, default=1000)
     p.add_argument("--reference", default="N4", help="reference group for significance")
+    p.add_argument("--dataset", default="kuairand", choices=["kuairand", "mind", "zhihurec"])
     args = p.parse_args(argv)
-    aggregate(args.runs_root, args.n_boot, args.reference)
+    aggregate(args.runs_root, args.n_boot, args.reference, args.dataset)
 
 
 if __name__ == "__main__":

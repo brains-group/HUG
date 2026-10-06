@@ -24,6 +24,8 @@ defaults:
   data_dir: KuaiRand-1K/data
   # Run once by the queue if <runs_root>/data_fingerprint.json is missing.
   fingerprint_cmd: "{python} Framework/fingerprint.py --data-dir {data_dir} --out {out}"
+  # Spec 06 datasets (MIND, ZhihuRec): adapter fingerprint; also fills the bundle cache
+  fingerprint_cmd_dataset: "{python} Framework/fingerprint.py --dataset {dataset} --out {out}"
   # Expected wall-clock minutes per job, used for the ETA in status.json until jobs of that
   # kind have finished (observed durations then take over).
   # TODO(W6.6): fill in from the W6 timing runs; null = unknown (excluded from the ETA).
@@ -791,4 +793,973 @@ jobs:
     kind: final_eval
     of: hug_sparse_norec_s42
     memory: heavy
+    depends_on: []
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # Spec 06 H: MIND and ZhihuRec. Every job carries `dataset:`; the queue appends
+  # --dataset <name> to its command and hashes it with that dataset's fingerprint
+  # (runs_root/data_fingerprint_<name>.json). KuaiRand jobs above are unchanged.
+  # Per dataset: 8 tuning trials per model (HUG N4/N1, every baseline; fusion heads
+  # sparse 8, evgate 6, misa 8), arms N0/N1/N2/N4 + sparse/evgate/misa, 3 seeds for
+  # N1, N4, sparse and the best baseline, 1 seed for the rest. Baseline seeds 43/44 are
+  # optional: after tuning, run them for the best baseline only, e.g.
+  #   --only 'baseline_TransAct_s4[34]_mind' --only 'final_eval_baseline_TransAct_s4[34]_mind'
+  # Not launched by spec 06: needs the user's sign-off (run-time estimate in
+  # docs/specs/06-datasets-results.md).
+  # ════════════════════════════════════════════════════════════════════════════
+
+  # ── mind: Stage 1a tuning (val only) ──
+  - name: tune_hug_N4_mind
+    kind: tune_hug
+    args: "--arm N4 --trials 8 --seed 0"
+    memory: heavy
+    group: tune_hug_N4@mind
+    dataset: mind
+    depends_on: []
+  - name: tune_hug_N1_mind
+    kind: tune_hug
+    args: "--arm N1 --trials 8 --seed 0"
+    memory: heavy
+    group: tune_hug_N1@mind
+    dataset: mind
+    depends_on: []
+  - name: tune_baseline_TransAct_mind
+    kind: tune_baseline
+    args: "--model TransAct --trials 8 --seed 0"
+    memory: light
+    group: tune_TransAct@mind
+    dataset: mind
+    depends_on: []
+  - name: tune_baseline_WuKong_mind
+    kind: tune_baseline
+    args: "--model WuKong --trials 8 --seed 0"
+    memory: light
+    group: tune_WuKong@mind
+    dataset: mind
+    depends_on: []
+  - name: tune_baseline_FiGNN_mind
+    kind: tune_baseline
+    args: "--model FiGNN --trials 8 --seed 0"
+    memory: light
+    group: tune_FiGNN@mind
+    dataset: mind
+    depends_on: []
+  - name: tune_baseline_DCNv2_mind
+    kind: tune_baseline
+    args: "--model DCNv2 --trials 8 --seed 0"
+    memory: light
+    group: tune_DCNv2@mind
+    dataset: mind
+    optional: true
+    depends_on: []
+  - name: tune_fusion_sparse_mind
+    kind: tune_hug
+    args: "--fusion sparse --trials 8 --seed 0 {best:tune_hug_N4_mind}"
+    memory: heavy
+    group: tune_fusion_sparse@mind
+    dataset: mind
+    depends_on: []
+  - name: tune_fusion_evgate_mind
+    kind: tune_hug
+    args: "--fusion evgate --trials 6 --seed 0 {best:tune_hug_N4_mind}"
+    memory: heavy
+    group: tune_fusion_evgate@mind
+    dataset: mind
+    depends_on: []
+  - name: tune_fusion_misa_mind
+    kind: tune_hug
+    args: "--fusion misa --trials 8 --seed 0 {best:tune_hug_N4_mind}"
+    memory: heavy
+    group: tune_fusion_misa@mind
+    dataset: mind
+    depends_on: []
+
+  # ── mind: Stage 1b HUG arms and fusion heads ──
+  - name: hug_N4_s42_mind
+    kind: hug
+    args: "{best:tune_hug_N4_mind}"
+    seed: 42
+    memory: heavy
+    model: HUG
+    arm: N4
+    group: N4@mind
+    dataset: mind
+    depends_on: []
+  - name: hug_N4_s43_mind
+    kind: hug
+    args: "{best:tune_hug_N4_mind}"
+    seed: 43
+    memory: heavy
+    model: HUG
+    arm: N4
+    group: N4@mind
+    dataset: mind
+    depends_on: []
+  - name: hug_N4_s44_mind
+    kind: hug
+    args: "{best:tune_hug_N4_mind}"
+    seed: 44
+    memory: heavy
+    model: HUG
+    arm: N4
+    group: N4@mind
+    dataset: mind
+    depends_on: []
+  - name: hug_N1own_s42_mind
+    kind: hug
+    args: "{best:tune_hug_N1_mind} --no-graph"
+    seed: 42
+    memory: heavy
+    model: HUG
+    arm: N1
+    group: N1@mind
+    dataset: mind
+    depends_on: []
+  - name: hug_N1own_s43_mind
+    kind: hug
+    args: "{best:tune_hug_N1_mind} --no-graph"
+    seed: 43
+    memory: heavy
+    model: HUG
+    arm: N1
+    group: N1@mind
+    dataset: mind
+    depends_on: []
+  - name: hug_N1own_s44_mind
+    kind: hug
+    args: "{best:tune_hug_N1_mind} --no-graph"
+    seed: 44
+    memory: heavy
+    model: HUG
+    arm: N1
+    group: N1@mind
+    dataset: mind
+    depends_on: []
+  - name: hug_N0_s42_mind
+    kind: hug
+    args: "{best:tune_hug_N4_mind} --no-graph --no-seq"
+    seed: 42
+    memory: heavy
+    model: HUG
+    arm: N0
+    group: N0@mind
+    dataset: mind
+    depends_on: []
+  - name: hug_N2_s42_mind
+    kind: hug
+    args: "{best:tune_hug_N4_mind} --no-seq"
+    seed: 42
+    memory: heavy
+    model: HUG
+    arm: N2
+    group: N2@mind
+    dataset: mind
+    depends_on: []
+  - name: hug_sparse_s42_mind
+    kind: hug
+    args: "{best:tune_fusion_sparse_mind}"
+    seed: 42
+    memory: heavy
+    model: HUG
+    arm: N4-sparse
+    group: fusion_sparse@mind
+    dataset: mind
+    depends_on: []
+  - name: hug_sparse_s43_mind
+    kind: hug
+    args: "{best:tune_fusion_sparse_mind}"
+    seed: 43
+    memory: heavy
+    model: HUG
+    arm: N4-sparse
+    group: fusion_sparse@mind
+    dataset: mind
+    depends_on: []
+  - name: hug_sparse_s44_mind
+    kind: hug
+    args: "{best:tune_fusion_sparse_mind}"
+    seed: 44
+    memory: heavy
+    model: HUG
+    arm: N4-sparse
+    group: fusion_sparse@mind
+    dataset: mind
+    depends_on: []
+  - name: hug_evgate_s42_mind
+    kind: hug
+    args: "{best:tune_fusion_evgate_mind}"
+    seed: 42
+    memory: heavy
+    model: HUG
+    arm: N4-evgate
+    group: fusion_evgate@mind
+    dataset: mind
+    depends_on: []
+  - name: hug_misa_s42_mind
+    kind: hug
+    args: "{best:tune_fusion_misa_mind}"
+    seed: 42
+    memory: heavy
+    model: HUG
+    arm: N4-misa
+    group: fusion_misa@mind
+    dataset: mind
+    depends_on: []
+
+  # ── mind: Stage 1c baselines (seeds 43/44 optional: best baseline only) ──
+  - name: baseline_TransAct_s42_mind
+    kind: baseline
+    args: "--model TransAct {best:tune_baseline_TransAct_mind}"
+    seed: 42
+    memory: light
+    model: TransAct
+    group: TransAct@mind
+    dataset: mind
+    depends_on: []
+  - name: baseline_TransAct_s43_mind
+    kind: baseline
+    args: "--model TransAct {best:tune_baseline_TransAct_mind}"
+    seed: 43
+    memory: light
+    model: TransAct
+    group: TransAct@mind
+    dataset: mind
+    optional: true
+    depends_on: []
+  - name: baseline_TransAct_s44_mind
+    kind: baseline
+    args: "--model TransAct {best:tune_baseline_TransAct_mind}"
+    seed: 44
+    memory: light
+    model: TransAct
+    group: TransAct@mind
+    dataset: mind
+    optional: true
+    depends_on: []
+  - name: baseline_WuKong_s42_mind
+    kind: baseline
+    args: "--model WuKong {best:tune_baseline_WuKong_mind}"
+    seed: 42
+    memory: light
+    model: WuKong
+    group: WuKong@mind
+    dataset: mind
+    depends_on: []
+  - name: baseline_WuKong_s43_mind
+    kind: baseline
+    args: "--model WuKong {best:tune_baseline_WuKong_mind}"
+    seed: 43
+    memory: light
+    model: WuKong
+    group: WuKong@mind
+    dataset: mind
+    optional: true
+    depends_on: []
+  - name: baseline_WuKong_s44_mind
+    kind: baseline
+    args: "--model WuKong {best:tune_baseline_WuKong_mind}"
+    seed: 44
+    memory: light
+    model: WuKong
+    group: WuKong@mind
+    dataset: mind
+    optional: true
+    depends_on: []
+  - name: baseline_FiGNN_s42_mind
+    kind: baseline
+    args: "--model FiGNN {best:tune_baseline_FiGNN_mind}"
+    seed: 42
+    memory: light
+    model: FiGNN
+    group: FiGNN@mind
+    dataset: mind
+    depends_on: []
+  - name: baseline_FiGNN_s43_mind
+    kind: baseline
+    args: "--model FiGNN {best:tune_baseline_FiGNN_mind}"
+    seed: 43
+    memory: light
+    model: FiGNN
+    group: FiGNN@mind
+    dataset: mind
+    optional: true
+    depends_on: []
+  - name: baseline_FiGNN_s44_mind
+    kind: baseline
+    args: "--model FiGNN {best:tune_baseline_FiGNN_mind}"
+    seed: 44
+    memory: light
+    model: FiGNN
+    group: FiGNN@mind
+    dataset: mind
+    optional: true
+    depends_on: []
+  - name: baseline_DCNv2_s42_mind
+    kind: baseline
+    args: "--model DCNv2 {best:tune_baseline_DCNv2_mind}"
+    seed: 42
+    memory: light
+    model: DCNv2
+    group: DCNv2@mind
+    dataset: mind
+    optional: true
+    depends_on: []
+  - name: baseline_DCNv2_s43_mind
+    kind: baseline
+    args: "--model DCNv2 {best:tune_baseline_DCNv2_mind}"
+    seed: 43
+    memory: light
+    model: DCNv2
+    group: DCNv2@mind
+    dataset: mind
+    optional: true
+    depends_on: []
+  - name: baseline_DCNv2_s44_mind
+    kind: baseline
+    args: "--model DCNv2 {best:tune_baseline_DCNv2_mind}"
+    seed: 44
+    memory: light
+    model: DCNv2
+    group: DCNv2@mind
+    dataset: mind
+    optional: true
+    depends_on: []
+
+  # ── mind: Stage 2 final_eval (val-selected best.pt, test once) ──
+  - name: final_eval_hug_N4_s42_mind
+    kind: final_eval
+    of: hug_N4_s42_mind
+    memory: heavy
+    dataset: mind
+    depends_on: []
+  - name: final_eval_hug_N4_s43_mind
+    kind: final_eval
+    of: hug_N4_s43_mind
+    memory: heavy
+    dataset: mind
+    depends_on: []
+  - name: final_eval_hug_N4_s44_mind
+    kind: final_eval
+    of: hug_N4_s44_mind
+    memory: heavy
+    dataset: mind
+    depends_on: []
+  - name: final_eval_hug_N1own_s42_mind
+    kind: final_eval
+    of: hug_N1own_s42_mind
+    memory: heavy
+    dataset: mind
+    depends_on: []
+  - name: final_eval_hug_N1own_s43_mind
+    kind: final_eval
+    of: hug_N1own_s43_mind
+    memory: heavy
+    dataset: mind
+    depends_on: []
+  - name: final_eval_hug_N1own_s44_mind
+    kind: final_eval
+    of: hug_N1own_s44_mind
+    memory: heavy
+    dataset: mind
+    depends_on: []
+  - name: final_eval_hug_N0_s42_mind
+    kind: final_eval
+    of: hug_N0_s42_mind
+    memory: heavy
+    dataset: mind
+    depends_on: []
+  - name: final_eval_hug_N2_s42_mind
+    kind: final_eval
+    of: hug_N2_s42_mind
+    memory: heavy
+    dataset: mind
+    depends_on: []
+  - name: final_eval_hug_sparse_s42_mind
+    kind: final_eval
+    of: hug_sparse_s42_mind
+    memory: heavy
+    dataset: mind
+    depends_on: []
+  - name: final_eval_hug_sparse_s43_mind
+    kind: final_eval
+    of: hug_sparse_s43_mind
+    memory: heavy
+    dataset: mind
+    depends_on: []
+  - name: final_eval_hug_sparse_s44_mind
+    kind: final_eval
+    of: hug_sparse_s44_mind
+    memory: heavy
+    dataset: mind
+    depends_on: []
+  - name: final_eval_hug_evgate_s42_mind
+    kind: final_eval
+    of: hug_evgate_s42_mind
+    memory: heavy
+    dataset: mind
+    depends_on: []
+  - name: final_eval_hug_misa_s42_mind
+    kind: final_eval
+    of: hug_misa_s42_mind
+    memory: heavy
+    dataset: mind
+    depends_on: []
+  - name: final_eval_baseline_TransAct_s42_mind
+    kind: final_eval
+    of: baseline_TransAct_s42_mind
+    memory: light
+    dataset: mind
+    depends_on: []
+  - name: final_eval_baseline_TransAct_s43_mind
+    kind: final_eval
+    of: baseline_TransAct_s43_mind
+    memory: light
+    dataset: mind
+    optional: true
+    depends_on: []
+  - name: final_eval_baseline_TransAct_s44_mind
+    kind: final_eval
+    of: baseline_TransAct_s44_mind
+    memory: light
+    dataset: mind
+    optional: true
+    depends_on: []
+  - name: final_eval_baseline_WuKong_s42_mind
+    kind: final_eval
+    of: baseline_WuKong_s42_mind
+    memory: light
+    dataset: mind
+    depends_on: []
+  - name: final_eval_baseline_WuKong_s43_mind
+    kind: final_eval
+    of: baseline_WuKong_s43_mind
+    memory: light
+    dataset: mind
+    optional: true
+    depends_on: []
+  - name: final_eval_baseline_WuKong_s44_mind
+    kind: final_eval
+    of: baseline_WuKong_s44_mind
+    memory: light
+    dataset: mind
+    optional: true
+    depends_on: []
+  - name: final_eval_baseline_FiGNN_s42_mind
+    kind: final_eval
+    of: baseline_FiGNN_s42_mind
+    memory: light
+    dataset: mind
+    depends_on: []
+  - name: final_eval_baseline_FiGNN_s43_mind
+    kind: final_eval
+    of: baseline_FiGNN_s43_mind
+    memory: light
+    dataset: mind
+    optional: true
+    depends_on: []
+  - name: final_eval_baseline_FiGNN_s44_mind
+    kind: final_eval
+    of: baseline_FiGNN_s44_mind
+    memory: light
+    dataset: mind
+    optional: true
+    depends_on: []
+  - name: final_eval_baseline_DCNv2_s42_mind
+    kind: final_eval
+    of: baseline_DCNv2_s42_mind
+    memory: light
+    dataset: mind
+    optional: true
+    depends_on: []
+  - name: final_eval_baseline_DCNv2_s43_mind
+    kind: final_eval
+    of: baseline_DCNv2_s43_mind
+    memory: light
+    dataset: mind
+    optional: true
+    depends_on: []
+  - name: final_eval_baseline_DCNv2_s44_mind
+    kind: final_eval
+    of: baseline_DCNv2_s44_mind
+    memory: light
+    dataset: mind
+    optional: true
+    depends_on: []
+
+  # ── zhihurec: Stage 1a tuning (val only) ──
+  - name: tune_hug_N4_zhihurec
+    kind: tune_hug
+    args: "--arm N4 --trials 8 --seed 0"
+    memory: heavy
+    group: tune_hug_N4@zhihurec
+    dataset: zhihurec
+    depends_on: []
+  - name: tune_hug_N1_zhihurec
+    kind: tune_hug
+    args: "--arm N1 --trials 8 --seed 0"
+    memory: heavy
+    group: tune_hug_N1@zhihurec
+    dataset: zhihurec
+    depends_on: []
+  - name: tune_baseline_TransAct_zhihurec
+    kind: tune_baseline
+    args: "--model TransAct --trials 8 --seed 0"
+    memory: light
+    group: tune_TransAct@zhihurec
+    dataset: zhihurec
+    depends_on: []
+  - name: tune_baseline_WuKong_zhihurec
+    kind: tune_baseline
+    args: "--model WuKong --trials 8 --seed 0"
+    memory: light
+    group: tune_WuKong@zhihurec
+    dataset: zhihurec
+    depends_on: []
+  - name: tune_baseline_FiGNN_zhihurec
+    kind: tune_baseline
+    args: "--model FiGNN --trials 8 --seed 0"
+    memory: light
+    group: tune_FiGNN@zhihurec
+    dataset: zhihurec
+    depends_on: []
+  - name: tune_baseline_DCNv2_zhihurec
+    kind: tune_baseline
+    args: "--model DCNv2 --trials 8 --seed 0"
+    memory: light
+    group: tune_DCNv2@zhihurec
+    dataset: zhihurec
+    optional: true
+    depends_on: []
+  - name: tune_fusion_sparse_zhihurec
+    kind: tune_hug
+    args: "--fusion sparse --trials 8 --seed 0 {best:tune_hug_N4_zhihurec}"
+    memory: heavy
+    group: tune_fusion_sparse@zhihurec
+    dataset: zhihurec
+    depends_on: []
+  - name: tune_fusion_evgate_zhihurec
+    kind: tune_hug
+    args: "--fusion evgate --trials 6 --seed 0 {best:tune_hug_N4_zhihurec}"
+    memory: heavy
+    group: tune_fusion_evgate@zhihurec
+    dataset: zhihurec
+    depends_on: []
+  - name: tune_fusion_misa_zhihurec
+    kind: tune_hug
+    args: "--fusion misa --trials 8 --seed 0 {best:tune_hug_N4_zhihurec}"
+    memory: heavy
+    group: tune_fusion_misa@zhihurec
+    dataset: zhihurec
+    depends_on: []
+
+  # ── zhihurec: Stage 1b HUG arms and fusion heads ──
+  - name: hug_N4_s42_zhihurec
+    kind: hug
+    args: "{best:tune_hug_N4_zhihurec}"
+    seed: 42
+    memory: heavy
+    model: HUG
+    arm: N4
+    group: N4@zhihurec
+    dataset: zhihurec
+    depends_on: []
+  - name: hug_N4_s43_zhihurec
+    kind: hug
+    args: "{best:tune_hug_N4_zhihurec}"
+    seed: 43
+    memory: heavy
+    model: HUG
+    arm: N4
+    group: N4@zhihurec
+    dataset: zhihurec
+    depends_on: []
+  - name: hug_N4_s44_zhihurec
+    kind: hug
+    args: "{best:tune_hug_N4_zhihurec}"
+    seed: 44
+    memory: heavy
+    model: HUG
+    arm: N4
+    group: N4@zhihurec
+    dataset: zhihurec
+    depends_on: []
+  - name: hug_N1own_s42_zhihurec
+    kind: hug
+    args: "{best:tune_hug_N1_zhihurec} --no-graph"
+    seed: 42
+    memory: heavy
+    model: HUG
+    arm: N1
+    group: N1@zhihurec
+    dataset: zhihurec
+    depends_on: []
+  - name: hug_N1own_s43_zhihurec
+    kind: hug
+    args: "{best:tune_hug_N1_zhihurec} --no-graph"
+    seed: 43
+    memory: heavy
+    model: HUG
+    arm: N1
+    group: N1@zhihurec
+    dataset: zhihurec
+    depends_on: []
+  - name: hug_N1own_s44_zhihurec
+    kind: hug
+    args: "{best:tune_hug_N1_zhihurec} --no-graph"
+    seed: 44
+    memory: heavy
+    model: HUG
+    arm: N1
+    group: N1@zhihurec
+    dataset: zhihurec
+    depends_on: []
+  - name: hug_N0_s42_zhihurec
+    kind: hug
+    args: "{best:tune_hug_N4_zhihurec} --no-graph --no-seq"
+    seed: 42
+    memory: heavy
+    model: HUG
+    arm: N0
+    group: N0@zhihurec
+    dataset: zhihurec
+    depends_on: []
+  - name: hug_N2_s42_zhihurec
+    kind: hug
+    args: "{best:tune_hug_N4_zhihurec} --no-seq"
+    seed: 42
+    memory: heavy
+    model: HUG
+    arm: N2
+    group: N2@zhihurec
+    dataset: zhihurec
+    depends_on: []
+  - name: hug_sparse_s42_zhihurec
+    kind: hug
+    args: "{best:tune_fusion_sparse_zhihurec}"
+    seed: 42
+    memory: heavy
+    model: HUG
+    arm: N4-sparse
+    group: fusion_sparse@zhihurec
+    dataset: zhihurec
+    depends_on: []
+  - name: hug_sparse_s43_zhihurec
+    kind: hug
+    args: "{best:tune_fusion_sparse_zhihurec}"
+    seed: 43
+    memory: heavy
+    model: HUG
+    arm: N4-sparse
+    group: fusion_sparse@zhihurec
+    dataset: zhihurec
+    depends_on: []
+  - name: hug_sparse_s44_zhihurec
+    kind: hug
+    args: "{best:tune_fusion_sparse_zhihurec}"
+    seed: 44
+    memory: heavy
+    model: HUG
+    arm: N4-sparse
+    group: fusion_sparse@zhihurec
+    dataset: zhihurec
+    depends_on: []
+  - name: hug_evgate_s42_zhihurec
+    kind: hug
+    args: "{best:tune_fusion_evgate_zhihurec}"
+    seed: 42
+    memory: heavy
+    model: HUG
+    arm: N4-evgate
+    group: fusion_evgate@zhihurec
+    dataset: zhihurec
+    depends_on: []
+  - name: hug_misa_s42_zhihurec
+    kind: hug
+    args: "{best:tune_fusion_misa_zhihurec}"
+    seed: 42
+    memory: heavy
+    model: HUG
+    arm: N4-misa
+    group: fusion_misa@zhihurec
+    dataset: zhihurec
+    depends_on: []
+
+  # ── zhihurec: Stage 1c baselines (seeds 43/44 optional: best baseline only) ──
+  - name: baseline_TransAct_s42_zhihurec
+    kind: baseline
+    args: "--model TransAct {best:tune_baseline_TransAct_zhihurec}"
+    seed: 42
+    memory: light
+    model: TransAct
+    group: TransAct@zhihurec
+    dataset: zhihurec
+    depends_on: []
+  - name: baseline_TransAct_s43_zhihurec
+    kind: baseline
+    args: "--model TransAct {best:tune_baseline_TransAct_zhihurec}"
+    seed: 43
+    memory: light
+    model: TransAct
+    group: TransAct@zhihurec
+    dataset: zhihurec
+    optional: true
+    depends_on: []
+  - name: baseline_TransAct_s44_zhihurec
+    kind: baseline
+    args: "--model TransAct {best:tune_baseline_TransAct_zhihurec}"
+    seed: 44
+    memory: light
+    model: TransAct
+    group: TransAct@zhihurec
+    dataset: zhihurec
+    optional: true
+    depends_on: []
+  - name: baseline_WuKong_s42_zhihurec
+    kind: baseline
+    args: "--model WuKong {best:tune_baseline_WuKong_zhihurec}"
+    seed: 42
+    memory: light
+    model: WuKong
+    group: WuKong@zhihurec
+    dataset: zhihurec
+    depends_on: []
+  - name: baseline_WuKong_s43_zhihurec
+    kind: baseline
+    args: "--model WuKong {best:tune_baseline_WuKong_zhihurec}"
+    seed: 43
+    memory: light
+    model: WuKong
+    group: WuKong@zhihurec
+    dataset: zhihurec
+    optional: true
+    depends_on: []
+  - name: baseline_WuKong_s44_zhihurec
+    kind: baseline
+    args: "--model WuKong {best:tune_baseline_WuKong_zhihurec}"
+    seed: 44
+    memory: light
+    model: WuKong
+    group: WuKong@zhihurec
+    dataset: zhihurec
+    optional: true
+    depends_on: []
+  - name: baseline_FiGNN_s42_zhihurec
+    kind: baseline
+    args: "--model FiGNN {best:tune_baseline_FiGNN_zhihurec}"
+    seed: 42
+    memory: light
+    model: FiGNN
+    group: FiGNN@zhihurec
+    dataset: zhihurec
+    depends_on: []
+  - name: baseline_FiGNN_s43_zhihurec
+    kind: baseline
+    args: "--model FiGNN {best:tune_baseline_FiGNN_zhihurec}"
+    seed: 43
+    memory: light
+    model: FiGNN
+    group: FiGNN@zhihurec
+    dataset: zhihurec
+    optional: true
+    depends_on: []
+  - name: baseline_FiGNN_s44_zhihurec
+    kind: baseline
+    args: "--model FiGNN {best:tune_baseline_FiGNN_zhihurec}"
+    seed: 44
+    memory: light
+    model: FiGNN
+    group: FiGNN@zhihurec
+    dataset: zhihurec
+    optional: true
+    depends_on: []
+  - name: baseline_DCNv2_s42_zhihurec
+    kind: baseline
+    args: "--model DCNv2 {best:tune_baseline_DCNv2_zhihurec}"
+    seed: 42
+    memory: light
+    model: DCNv2
+    group: DCNv2@zhihurec
+    dataset: zhihurec
+    optional: true
+    depends_on: []
+  - name: baseline_DCNv2_s43_zhihurec
+    kind: baseline
+    args: "--model DCNv2 {best:tune_baseline_DCNv2_zhihurec}"
+    seed: 43
+    memory: light
+    model: DCNv2
+    group: DCNv2@zhihurec
+    dataset: zhihurec
+    optional: true
+    depends_on: []
+  - name: baseline_DCNv2_s44_zhihurec
+    kind: baseline
+    args: "--model DCNv2 {best:tune_baseline_DCNv2_zhihurec}"
+    seed: 44
+    memory: light
+    model: DCNv2
+    group: DCNv2@zhihurec
+    dataset: zhihurec
+    optional: true
+    depends_on: []
+
+  # ── zhihurec: Stage 2 final_eval (val-selected best.pt, test once) ──
+  - name: final_eval_hug_N4_s42_zhihurec
+    kind: final_eval
+    of: hug_N4_s42_zhihurec
+    memory: heavy
+    dataset: zhihurec
+    depends_on: []
+  - name: final_eval_hug_N4_s43_zhihurec
+    kind: final_eval
+    of: hug_N4_s43_zhihurec
+    memory: heavy
+    dataset: zhihurec
+    depends_on: []
+  - name: final_eval_hug_N4_s44_zhihurec
+    kind: final_eval
+    of: hug_N4_s44_zhihurec
+    memory: heavy
+    dataset: zhihurec
+    depends_on: []
+  - name: final_eval_hug_N1own_s42_zhihurec
+    kind: final_eval
+    of: hug_N1own_s42_zhihurec
+    memory: heavy
+    dataset: zhihurec
+    depends_on: []
+  - name: final_eval_hug_N1own_s43_zhihurec
+    kind: final_eval
+    of: hug_N1own_s43_zhihurec
+    memory: heavy
+    dataset: zhihurec
+    depends_on: []
+  - name: final_eval_hug_N1own_s44_zhihurec
+    kind: final_eval
+    of: hug_N1own_s44_zhihurec
+    memory: heavy
+    dataset: zhihurec
+    depends_on: []
+  - name: final_eval_hug_N0_s42_zhihurec
+    kind: final_eval
+    of: hug_N0_s42_zhihurec
+    memory: heavy
+    dataset: zhihurec
+    depends_on: []
+  - name: final_eval_hug_N2_s42_zhihurec
+    kind: final_eval
+    of: hug_N2_s42_zhihurec
+    memory: heavy
+    dataset: zhihurec
+    depends_on: []
+  - name: final_eval_hug_sparse_s42_zhihurec
+    kind: final_eval
+    of: hug_sparse_s42_zhihurec
+    memory: heavy
+    dataset: zhihurec
+    depends_on: []
+  - name: final_eval_hug_sparse_s43_zhihurec
+    kind: final_eval
+    of: hug_sparse_s43_zhihurec
+    memory: heavy
+    dataset: zhihurec
+    depends_on: []
+  - name: final_eval_hug_sparse_s44_zhihurec
+    kind: final_eval
+    of: hug_sparse_s44_zhihurec
+    memory: heavy
+    dataset: zhihurec
+    depends_on: []
+  - name: final_eval_hug_evgate_s42_zhihurec
+    kind: final_eval
+    of: hug_evgate_s42_zhihurec
+    memory: heavy
+    dataset: zhihurec
+    depends_on: []
+  - name: final_eval_hug_misa_s42_zhihurec
+    kind: final_eval
+    of: hug_misa_s42_zhihurec
+    memory: heavy
+    dataset: zhihurec
+    depends_on: []
+  - name: final_eval_baseline_TransAct_s42_zhihurec
+    kind: final_eval
+    of: baseline_TransAct_s42_zhihurec
+    memory: light
+    dataset: zhihurec
+    depends_on: []
+  - name: final_eval_baseline_TransAct_s43_zhihurec
+    kind: final_eval
+    of: baseline_TransAct_s43_zhihurec
+    memory: light
+    dataset: zhihurec
+    optional: true
+    depends_on: []
+  - name: final_eval_baseline_TransAct_s44_zhihurec
+    kind: final_eval
+    of: baseline_TransAct_s44_zhihurec
+    memory: light
+    dataset: zhihurec
+    optional: true
+    depends_on: []
+  - name: final_eval_baseline_WuKong_s42_zhihurec
+    kind: final_eval
+    of: baseline_WuKong_s42_zhihurec
+    memory: light
+    dataset: zhihurec
+    depends_on: []
+  - name: final_eval_baseline_WuKong_s43_zhihurec
+    kind: final_eval
+    of: baseline_WuKong_s43_zhihurec
+    memory: light
+    dataset: zhihurec
+    optional: true
+    depends_on: []
+  - name: final_eval_baseline_WuKong_s44_zhihurec
+    kind: final_eval
+    of: baseline_WuKong_s44_zhihurec
+    memory: light
+    dataset: zhihurec
+    optional: true
+    depends_on: []
+  - name: final_eval_baseline_FiGNN_s42_zhihurec
+    kind: final_eval
+    of: baseline_FiGNN_s42_zhihurec
+    memory: light
+    dataset: zhihurec
+    depends_on: []
+  - name: final_eval_baseline_FiGNN_s43_zhihurec
+    kind: final_eval
+    of: baseline_FiGNN_s43_zhihurec
+    memory: light
+    dataset: zhihurec
+    optional: true
+    depends_on: []
+  - name: final_eval_baseline_FiGNN_s44_zhihurec
+    kind: final_eval
+    of: baseline_FiGNN_s44_zhihurec
+    memory: light
+    dataset: zhihurec
+    optional: true
+    depends_on: []
+  - name: final_eval_baseline_DCNv2_s42_zhihurec
+    kind: final_eval
+    of: baseline_DCNv2_s42_zhihurec
+    memory: light
+    dataset: zhihurec
+    optional: true
+    depends_on: []
+  - name: final_eval_baseline_DCNv2_s43_zhihurec
+    kind: final_eval
+    of: baseline_DCNv2_s43_zhihurec
+    memory: light
+    dataset: zhihurec
+    optional: true
+    depends_on: []
+  - name: final_eval_baseline_DCNv2_s44_zhihurec
+    kind: final_eval
+    of: baseline_DCNv2_s44_zhihurec
+    memory: light
+    dataset: zhihurec
+    optional: true
     depends_on: []

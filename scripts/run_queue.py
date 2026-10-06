@@ -70,6 +70,8 @@ logger = logging.getLogger("run_queue")
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 KINDS = ("hug", "baseline", "tune_hug", "tune_baseline", "final_eval")
+DATASETS = ("kuairand", "mind", "zhihurec")
+DEFAULT_DATASET = "kuairand"      # its jobs get no --dataset flag, so their hashes predate spec 06
 TUNE_KINDS = ("tune_hug", "tune_baseline")
 STAGE1_EVAL_KINDS = ("hug", "baseline")
 MEMORY_CLASSES = ("heavy", "light")
@@ -110,6 +112,7 @@ class Job:
     group: str | None = None          # aggregation label (e.g. "N1-own", "TransAct")
     model: str | None = None
     arm: str | None = None
+    dataset: str = DEFAULT_DATASET
 
     # Runtime state
     state: str = "pending"
@@ -135,7 +138,7 @@ class Job:
         return {"name": self.name, "kind": self.kind, "args": self.args, "seed": self.seed,
                 "memory": self.memory, "depends_on": self.depends_on, "of": self.of,
                 "optional": self.optional, "group": self.group, "model": self.model,
-                "arm": self.arm}
+                "arm": self.arm, "dataset": self.dataset}
 
 
 @dataclass
@@ -192,6 +195,7 @@ def parse_plan(data: dict[str, Any]) -> Plan:
             group=raw.get("group"),
             model=raw.get("model"),
             arm=raw.get("arm"),
+            dataset=str(raw.get("dataset", defaults.get("dataset", DEFAULT_DATASET))),
         )
     plan = Plan(defaults=defaults, jobs=jobs)
     validate_plan(plan)
@@ -206,6 +210,8 @@ def load_plan(path: Path) -> Plan:
 def validate_plan(plan: Plan) -> None:
     """Check kinds, references, memory classes, test-set discipline and acyclicity."""
     for job in plan.jobs.values():
+        if job.dataset not in DATASETS:
+            raise PlanError(f"job {job.name}: unknown dataset {job.dataset!r} (expected one of {DATASETS})")
         if job.memory not in MEMORY_CLASSES:
             raise PlanError(f"job {job.name}: memory must be one of {MEMORY_CLASSES}")
         bad = [a for a in job.args if a.split("=")[0] in TEST_FLAGS]
@@ -216,6 +222,8 @@ def validate_plan(plan: Plan) -> None:
         if job.kind == "final_eval":
             if not job.of or job.of not in plan.jobs:
                 raise PlanError(f"final_eval job {job.name}: 'of' must name a plan job")
+            if plan.jobs[job.of].dataset != job.dataset:
+                job.dataset = plan.jobs[job.of].dataset        # inherits its stage-1 job's data
             if plan.jobs[job.of].kind not in STAGE1_EVAL_KINDS:
                 raise PlanError(f"final_eval job {job.name}: 'of' must be a hug or baseline job")
         elif job.of:
@@ -225,6 +233,8 @@ def validate_plan(plan: Plan) -> None:
         for ref in job.best_refs():
             if ref not in plan.jobs or plan.jobs[ref].kind not in TUNE_KINDS:
                 raise PlanError(f"job {job.name}: {{best:{ref}}} must name a tuning job")
+            if plan.jobs[ref].dataset != job.dataset:
+                raise PlanError(f"job {job.name}: {{best:{ref}}} was tuned on another dataset")
         for dep in plan.all_deps(job):
             if dep not in plan.jobs:
                 raise PlanError(f"job {job.name}: unknown dependency {dep}")
@@ -276,6 +286,11 @@ def select_jobs(plan: Plan, patterns: list[str] | None, skip_optional: bool = Fa
             wanted.add(name)
             stack.extend(plan.all_deps(plan.jobs[name]))
     return [n for n in plan.jobs if n in wanted]
+
+
+def _dataset_args(dataset: str) -> list[str]:
+    """--dataset for spec 06 datasets; none for the default, so KuaiRand hashes are unchanged."""
+    return [] if dataset == DEFAULT_DATASET else ["--dataset", dataset]
 
 
 # ── Fingerprints and config hash ───────────────────────────────────────────────
@@ -414,7 +429,7 @@ class JobQueue:
         runs_root: Path,
         gpus: list[int],
         code_fp: str,
-        data_fp: str,
+        data_fp: str | dict[str, str],
         *,
         git_fp: str | None = None,
         repo_root: Path = REPO_ROOT,
@@ -436,7 +451,9 @@ class JobQueue:
         self.gpus = list(gpus)
         self.code_fp = code_fp            # CODE_COMPAT_VERSION key (hashed)
         self.git_fp = git_fp              # git tree + dirty diff (recorded only)
-        self.data_fp = data_fp
+        # one data fingerprint per dataset (a plain string = the default dataset's)
+        self.data_fps = dict(data_fp) if isinstance(data_fp, dict) else {DEFAULT_DATASET: data_fp}
+        self.data_fp = self.data_fps.get(DEFAULT_DATASET)
         self.repo_root = Path(repo_root)
         self.launcher = launcher
         self.pack = pack
@@ -486,16 +503,17 @@ class JobQueue:
     def _base_command(self, job: Job) -> list[str]:
         """The command without per-launch flags (device, hash, token, resume, quiet)."""
         d = self._rel(self.run_dir(job.name))
+        ds = _dataset_args(job.dataset)
         if job.kind == "hug":
             return ["Framework/main.py", "--model-type", "hug", "--run-dir", d,
-                    "--seed", str(job.seed), *self.resolve_args(job.args)]
+                    "--seed", str(job.seed), *self.resolve_args(job.args), *ds]
         if job.kind == "baseline":
             return ["Baselines/train.py", "--run-dir", d, "--seed", str(job.seed),
-                    *self.resolve_args(job.args)]
+                    *self.resolve_args(job.args), *ds]
         if job.kind == "tune_hug":
-            return ["Framework/tune_hug.py", "--out", d, *self.resolve_args(job.args)]
+            return ["Framework/tune_hug.py", "--out", d, *self.resolve_args(job.args), *ds]
         if job.kind == "tune_baseline":
-            return ["Baselines/tune.py", "--out", d, *self.resolve_args(job.args)]
+            return ["Baselines/tune.py", "--out", d, *self.resolve_args(job.args), *ds]
         # final_eval: re-run the stage-1 job's eval on test from its val-selected checkpoint.
         stage1 = self.plan.jobs[job.of]
         ckpt = self._rel(self.run_dir(stage1.name) / "best.pt")
@@ -503,7 +521,7 @@ class JobQueue:
                 else ["Baselines/train.py"])
         return [*head, "--run-dir", d, "--eval-only", "--checkpoint", ckpt, "--eval-test",
                 "--seed", str(stage1.seed), *self.resolve_args(stage1.args),
-                *self.resolve_args(job.args)]
+                *self.resolve_args(job.args), *_dataset_args(stage1.dataset)]
 
     def _uses_device_flag(self, job: Job) -> bool:
         if job.kind == "final_eval":
@@ -531,7 +549,10 @@ class JobQueue:
         if job.kind == "final_eval":
             stage1 = self.jobs[job.of]
             extra["of"] = stage1.config_hash or self.compute_hash(stage1)
-        return config_hash(self.hashed_args(job), self.code_fp, self.data_fp, extra)
+        ds = self.plan.jobs[job.of].dataset if job.kind == "final_eval" else job.dataset
+        if ds not in self.data_fps:
+            raise PlanError(f"job {job.name}: no data fingerprint for dataset {ds!r}")
+        return config_hash(self.hashed_args(job), self.code_fp, self.data_fps[ds], extra)
 
     def build_command(self, job: Job, gpu: int, chash: str, *, resume: bool = False,
                       token: str | None = None) -> list[str]:
@@ -800,13 +821,19 @@ def dry_run_root(runs_root: Path) -> Path:
     return runs_root.with_name(runs_root.name + "_dryrun")
 
 
-def ensure_data_fingerprint(plan: Plan, path: Path, repo_root: Path, python: str) -> str:
-    """Return the data fingerprint, running the plan's fingerprint command if the file is missing."""
+def ensure_data_fingerprint(plan: Plan, path: Path, repo_root: Path, python: str,
+                            dataset: str = DEFAULT_DATASET) -> str:
+    """
+    Return a dataset's data fingerprint, running the plan's fingerprint command if the
+    file is missing (defaults.fingerprint_cmd for the default dataset,
+    defaults.fingerprint_cmd_dataset with {dataset} for the others).
+    """
     if not path.is_file():
-        template = plan.defaults.get("fingerprint_cmd")
+        key = "fingerprint_cmd" if dataset == DEFAULT_DATASET else "fingerprint_cmd_dataset"
+        template = plan.defaults.get(key)
         if not template:
-            raise SystemExit(f"{path} is missing and the plan has no defaults.fingerprint_cmd")
-        cmd = shlex.split(template.format(python=python, out=path,
+            raise SystemExit(f"{path} is missing and the plan has no defaults.{key}")
+        cmd = shlex.split(template.format(python=python, out=path, dataset=dataset,
                                           data_dir=plan.defaults.get("data_dir", "")))
         logger.info("computing data fingerprint: %s", " ".join(cmd))
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -848,8 +875,12 @@ def main(argv: list[str] | None = None) -> int:
     runs_root = args.runs_root if args.runs_root.is_absolute() else REPO_ROOT / args.runs_root
     if args.dry_run:
         runs_root = dry_run_root(runs_root)
-    fp_file = args.fingerprint_file or runs_root / "data_fingerprint.json"
-    data_fp = ensure_data_fingerprint(plan, fp_file, REPO_ROOT, args.python)
+    selected = select_jobs(plan, args.only, args.skip_optional)
+    data_fp = {}
+    for ds in dict.fromkeys(plan.jobs[n].dataset for n in selected):
+        fp_file = (args.fingerprint_file or runs_root / "data_fingerprint.json"
+                   if ds == DEFAULT_DATASET else runs_root / f"data_fingerprint_{ds}.json")
+        data_fp[ds] = ensure_data_fingerprint(plan, fp_file, REPO_ROOT, args.python, ds)
     code_fp = code_compat_key(REPO_ROOT)          # enters the hash
     git_fp = code_fingerprint(REPO_ROOT)          # recorded only
 

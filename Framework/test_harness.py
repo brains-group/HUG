@@ -627,3 +627,56 @@ def test_run_placeholder_expands_and_adds_dependency(tmp_path):
                                      "seed": 1, "memory": "heavy"}]}
     with pytest.raises(rq.PlanError):
         rq.validate_plan(rq.parse_plan(bad))
+
+
+# ── Spec 06 H: dataset dimension ───────────────────────────────────────────────
+
+MULTI = {"jobs": PLAN["jobs"] + [
+    {"name": "tune_hug_N4_mind", "kind": "tune_hug", "args": "--arm N4 --trials 8 --seed 0",
+     "dataset": "mind"},
+    {"name": "hug_N4_s42_mind", "kind": "hug", "args": "{best:tune_hug_N4_mind}", "seed": 42,
+     "group": "N4@mind", "dataset": "mind"},
+    {"name": "final_eval_hug_N4_s42_mind", "kind": "final_eval", "of": "hug_N4_s42_mind"},
+]}
+
+
+class TestDatasetDimension:
+
+    def test_only_spec06_jobs_get_dataset_flag_and_kuairand_hashes_unchanged(self, tmp_path):
+        q0 = make_queue(tmp_path, None)
+        q = make_queue(tmp_path, None, MULTI, data_fp={"kuairand": "data-a", "mind": "data-m"})
+        for name in ("hug_N4_s42", "baseline_TransAct_s42", "final_eval_hug_N4_s42"):
+            assert "--dataset" not in q._base_command(q.plan.jobs[name])
+            assert q.compute_hash(q.plan.jobs[name]) == q0.compute_hash(q0.plan.jobs[name])
+        for name in ("tune_hug_N4_mind", "hug_N4_s42_mind", "final_eval_hug_N4_s42_mind"):
+            cmd = q._base_command(q.plan.jobs[name])
+            assert cmd[cmd.index("--dataset") + 1] == "mind"
+        assert q.plan.jobs["final_eval_hug_N4_s42_mind"].dataset == "mind"
+
+    def test_hash_uses_the_jobs_own_data_fingerprint(self, tmp_path):
+        a = make_queue(tmp_path, None, MULTI, data_fp={"kuairand": "data-a", "mind": "data-m"})
+        b = make_queue(tmp_path, None, MULTI, data_fp={"kuairand": "data-a", "mind": "data-m2"})
+        j = "hug_N4_s42_mind"
+        assert a.compute_hash(a.plan.jobs[j]) != b.compute_hash(b.plan.jobs[j])
+        assert a.compute_hash(a.plan.jobs["hug_N4_s42"]) == b.compute_hash(b.plan.jobs["hug_N4_s42"])
+
+    def test_cross_dataset_best_refused_and_unknown_dataset_refused(self):
+        bad = {"jobs": [{"name": "t", "kind": "tune_hug", "args": ""},
+                        {"name": "h", "kind": "hug", "seed": 1, "args": "{best:t}", "dataset": "mind"}]}
+        with pytest.raises(rq.PlanError):
+            rq.parse_plan(bad)
+        with pytest.raises(rq.PlanError):
+            rq.parse_plan({"jobs": [{"name": "h", "kind": "hug", "seed": 1, "dataset": "taobao"}]})
+
+    def test_heavy_run_plan_has_every_dataset(self):
+        plan = rq.load_plan(REPO_ROOT / "experiments" / "heavy_run.yaml")
+        by_ds = {}
+        for j in plan.jobs.values():
+            by_ds.setdefault(j.dataset, []).append(j)
+        assert set(by_ds) == {"kuairand", "mind", "zhihurec"}
+        for ds in ("mind", "zhihurec"):
+            groups = {j.group for j in by_ds[ds] if j.kind == "hug"}
+            assert {f"{a}@{ds}" for a in ("N0", "N1", "N2", "N4", "fusion_sparse", "fusion_evgate",
+                                          "fusion_misa")} <= groups
+            tunes = [j for j in by_ds[ds] if j.kind in rq.TUNE_KINDS]
+            assert all("--trials 8" in " ".join(j.args) or "--fusion" in " ".join(j.args) for j in tunes)
