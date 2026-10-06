@@ -26,7 +26,10 @@ GPUS=${GPUS:-0,1}
 MIN_FREE_MB=${MIN_FREE_MB:-60000}
 PLAN=experiments/heavy_run.yaml
 RUNS=runs/heavy
-ONLY=(--only 'tune_hug_N4' --only 'tune_hug_N1' --only 'tune_baseline_*')
+# Exact names: since Spec 06 the plan also holds *_mind / *_zhihurec jobs that globs would catch
+STAGE1A=(tune_hug_N4 tune_hug_N1 tune_baseline_TransAct tune_baseline_WuKong tune_baseline_FiGNN
+         tune_baseline_DCNv2)
+ONLY=(); for j in "${STAGE1A[@]}"; do ONLY+=(--only "$j"); done
 CHECK_ONLY=0
 [ "${1:-}" = "--check" ] && CHECK_ONLY=1
 
@@ -102,15 +105,16 @@ if [ "${SKIP_TESTS:-0}" != 1 ]; then
 fi
 
 # 7. Plan sanity: Stage 1a selection, no test access --------------------------------
-"$PY" - "$PLAN" <<'EOF' || fail "plan check failed"
+"$PY" - "$PLAN" "${STAGE1A[@]}" <<'EOF' || fail "plan check failed"
 import sys, fnmatch, yaml
 jobs = yaml.safe_load(open(sys.argv[1]))["jobs"]
-sel = [j for j in jobs if any(fnmatch.fnmatch(j["name"], g)
-                              for g in ("tune_hug_N4", "tune_hug_N1", "tune_baseline_*"))]
+sel = [j for j in jobs if any(fnmatch.fnmatch(j["name"], g) for g in sys.argv[2:])]
 names = sorted(j["name"] for j in sel)
 assert names == sorted(["tune_hug_N4", "tune_hug_N1", "tune_baseline_TransAct", "tune_baseline_WuKong",
                         "tune_baseline_FiGNN", "tune_baseline_DCNv2"]), names
 assert all("--eval-test" not in str(j.get("args", "")) for j in sel)
+assert all(j.get("dataset") in (None, "kuairand") for j in sel), "non-KuaiRand job selected"
+assert all("--trials 12" in j["args"] for j in sel), [j["args"] for j in sel]
 print("stage 1a jobs:", ", ".join(names))
 EOF
 log "ok  plan selects exactly the six Stage 1a tuning jobs"
