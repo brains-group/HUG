@@ -485,7 +485,7 @@ def run_split(
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="KuaiRand CVR pipeline — temporal train/test split",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -537,8 +537,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--kg-alignment", type=int, default=0)
     p.add_argument("--hidden-dim",  type=int, default=128)
     p.add_argument("--out-dim",     type=int, default=64)
-    p.add_argument("--model-type",  type=str, default="dual",
-                   choices=["dual", "single"],
+    p.add_argument("--model-type",  type=str, default="hug",
+                   choices=["hug", "dual", "single"],
                    help="dual: R-GCN + SR-GNN + alignment (proposed). "
                         "single: HGT over full HKG, no alignment (baseline).")
 
@@ -554,8 +554,9 @@ def parse_args() -> argparse.Namespace:
                         "hyperparameter-sensitivity runs (e.g. 'layers3').")
 
     # Training
-    p.add_argument("--epochs",       type=int,   default=10)
-    p.add_argument("--batch-size",   type=int,   default=2048)
+    p.add_argument("--epochs",       type=int,   default=10, help="legacy models")
+    p.add_argument("--batch-size",   type=int,   default=None,
+                   help="Default 8192 for hug, 2048 for the legacy models")
     p.add_argument("--lr",           type=float, default=1e-3)
     p.add_argument("--weight-decay", type=float, default=1e-5)
 
@@ -566,7 +567,52 @@ def parse_args() -> argparse.Namespace:
                    help="GPU index for StructuralGNN (default 0)")
     p.add_argument("--gpu-sequential", type=int, default=1,
                    help="GPU index for SequentialGNN (default 1)")
-    return p.parse_args()
+    # ── HUG (spec 03/04) ──
+    h = p.add_argument_group("hug")
+    h.add_argument("--run-dir", type=str, default=None,
+                   help="Run directory (hug). Default: <output-dir>/<run name>")
+    h.add_argument("--params", type=str, default=None,
+                   help="YAML of argument overrides (e.g. tuned settings); explicit flags win")
+    h.add_argument("--emb-dim", type=int, default=64)
+    h.add_argument("--min-id-count", type=int, default=5)
+    h.add_argument("--graph-layers", type=int, default=2)
+    h.add_argument("--cl-weight", type=float, default=0.1)
+    h.add_argument("--cl-layer", type=int, default=1)
+    h.add_argument("--cl-eps", type=float, default=0.1)
+    h.add_argument("--cl-temp", type=float, default=0.2)
+    h.add_argument("--seq-layers", type=int, default=2)
+    h.add_argument("--dropout", type=float, default=0.1)
+    h.add_argument("--emb-l2", type=float, default=1e-6)
+    h.add_argument("--max-epochs", type=int, default=20)
+    h.add_argument("--patience", type=int, default=2)
+    h.add_argument("--holdout-frac", type=float, default=0.05)
+    h.add_argument("--no-graph", action="store_true", help="arm switch: no graph view (h0 only)")
+    h.add_argument("--no-seq", action="store_true", help="arm switch: no sequence view")
+    h.add_argument("--freeze-graph", action="store_true",
+                   help="arm switch: graph propagation under no_grad, uniform relation weights, no CL")
+    h.add_argument("--graph-tokens", action="store_true",
+                   help="optional G-tok arm: history tokens are graph outputs instead of h0")
+    h.add_argument("--resume", action="store_true", help="continue from <run-dir>/last.pt")
+    h.add_argument("--checkpoint", type=str, default=None, help="weights for --eval-only")
+    h.add_argument("--max-steps", type=int, default=0,
+                   help="dry run: stop after N optimizer steps; evaluate on 2 val snapshots")
+    h.add_argument("--quiet", action="store_true", help="no progress bars (also when not a TTY)")
+    h.add_argument("--config-hash", type=str, default=None, help="set by scripts/run_queue.py")
+    h.add_argument("--test-access-token", type=str, default=None,
+                   help="one-time token issued by scripts/run_queue.py for final_eval jobs")
+    h.add_argument("--i-know-this-touches-test", action="store_true",
+                   help="manual override of the test-set guard (logged)")
+
+    # --params YAML provides defaults; flags given on the command line still win
+    pre, _ = p.parse_known_args(argv)
+    if pre.params:
+        import yaml
+        overrides = yaml.safe_load(Path(pre.params).read_text()) or {}
+        p.set_defaults(**{k.replace("-", "_"): v for k, v in overrides.items()})
+    args = p.parse_args(argv)
+    if args.batch_size is None:
+        args.batch_size = 8192 if args.model_type == "hug" else 2048
+    return args
 
 
 def resolve_device(requested: str | None) -> torch.device:
@@ -638,6 +684,19 @@ def make_run_name(args: argparse.Namespace) -> str:
 
 def main() -> None:
     args      = parse_args()
+
+    if args.model_type == "hug":
+        import hug_train
+        if args.run_dir is None:
+            args.run_dir = str(Path(args.output_dir) / f"{args.scale}_hug_{hug_train.arm_name(args)}_s{args.seed}"
+                               + (f"_{args.run_tag}" if args.run_tag else ""))
+        hug_train.run(args)
+        return
+
+    if args.eval_test:
+        from test_guard import authorize_test_access
+        authorize_test_access(Path(args.output_dir), args.test_access_token,
+                              args.i_know_this_touches_test, make_run_name(args), args.config_hash)
     device    = resolve_device(args.device)
     cache_dir = resolve_cache_dir(args)
     use_amp   = (not args.no_amp) and (device.type == "cuda")

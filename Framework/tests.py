@@ -1247,3 +1247,316 @@ class TestRealData:
             if et[0] == "user" and et[2] == "video":
                 ei = g[et].edge_index.cpu()
                 assert not (_edge_pairs(ei) & sample), et
+
+
+# ── TestHUG (spec 03/04) ───────────────────────────────────────────────────────
+
+def _hug_args(**kw):
+    import main as pipeline
+    argv = ["--data-dir", "unused", "--cache-dir", "none", "--device", "cpu", "--quiet",
+            "--emb-dim", "8", "--min-id-count", "2", "--snapshot-hours", "4",
+            "--batch-size", "64", "--max-epochs", "2", "--seq-layers", "1", "--max-seq-len", "5"]
+    for k, v in kw.items():
+        flag = "--" + k.replace("_", "-")
+        argv += [flag] if v is True else ([] if v is False else [flag, str(v)])
+    return pipeline.parse_args(argv)
+
+
+def _rewrite_after(data, T, seed=1):
+    """Copy of `data` with every interaction at or after T rewritten."""
+    import copy
+    out = copy.copy(data)
+    rng = np.random.default_rng(seed)
+    for name in ("log_combined", "session_map"):
+        df = getattr(data, name).copy()
+        late = df["time_ms"].values >= T
+        for col in ["is_click", "is_like", "is_follow", "is_comment",
+                    "is_forward", "is_hate", "long_view"]:
+            df.loc[late, col] = 1 - df.loc[late, col]
+        df.loc[late, "video_id"] = rng.permutation(df.loc[late, "video_id"].values)
+        setattr(out, name, df)
+    return out
+
+
+@pytest.fixture(scope="module")
+def hug_data(loaded_data, timed_bundle):
+    import hug_train
+    return hug_train.prepare(_hug_args(), data=loaded_data, bundle=timed_bundle)
+
+
+def _hug_model(args, d, seed=0):
+    import hug_train
+    torch.manual_seed(seed)
+    return hug_train.build(args, d)
+
+
+class TestHUG:
+
+    def test_history_strictly_earlier(self, hug_data):
+        it = hug_data.inter
+        for i in range(len(it.time)):
+            rows = hug_data.hist_seq[hug_data.hist_start[i]:hug_data.hist_end[i]]
+            assert (it.time[rows] < it.time[i]).all()
+            assert (it.user[rows] == it.user[i]).all()
+            assert (it.label[rows] == 1).all()
+            assert len(rows) <= 5
+
+    def test_gradient_routing(self, hug_data):
+        import hug_train
+        for frozen in (False, True):
+            args = _hug_args(freeze_graph=frozen)
+            model = _hug_model(args, hug_data)
+            snaps = hug_train.Snapshots(hug_data, model, torch.device("cpu"))
+            b = hug_train.HugBatcher(hug_data, args.max_seq_len)(hug_data.train_rows[:64])
+            vx = snaps.enter(int(hug_data.snap[hug_data.train_rows[0]]))
+            model.train()
+            out = model(b, vx, model.graph_tables(vx, train=True), train=True)
+            out["loss"].backward()
+            if frozen:
+                assert model.gcn.a.grad is None
+            else:
+                assert model.gcn.a.grad is not None and model.gcn.a.grad.abs().sum() > 0
+                assert model.inp.user_id.weight.grad.abs().sum() > 0
+            assert model.inp.video_proj.weight.grad.abs().sum() > 0
+            assert all(p.grad is not None for p in model.seq.parameters() if p.requires_grad
+                       and p is not model.seq.empty)
+            assert model.head[0].weight.grad.abs().sum() > 0
+
+    def test_rellightgcn_hand_computation(self):
+        from hug import RelLightGCN
+        # 3 users, 3 videos; relation 0 user->video, relation 1 video->user
+        rel = [("user", "video"), ("video", "user")]
+        gcn = RelLightGCN(rel, num_layers=1)
+        src = torch.tensor([0, 0, 1, 2]); dst = torch.tensor([0, 1, 1, 2])
+        gcn.set_graph([(src, dst), (dst, src)], {"user": 3, "video": 3})
+        h0 = {"user": torch.arange(6.).view(3, 2), "video": torch.arange(6., 12.).view(3, 2)}
+        g, _ = gcn(h0)
+        w = torch.softmax(gcn.a[0], 0)
+        exp_v = torch.zeros(3, 2)
+        du, dv = torch.bincount(src, minlength=3).float(), torch.bincount(dst, minlength=3).float()
+        for s, t in zip(src.tolist(), dst.tolist()):
+            exp_v[t] += h0["user"][s] / (dv[t] * du[s]).sqrt()
+        exp_u = torch.zeros(3, 2)
+        for s, t in zip(dst.tolist(), src.tolist()):
+            exp_u[t] += h0["video"][s] / (du[t] * dv[s]).sqrt()
+        assert torch.allclose(g["video"], (h0["video"] + w[0] * exp_v) / 2, atol=1e-6)
+        assert torch.allclose(g["user"], (h0["user"] + w[1] * exp_u) / 2, atol=1e-6)
+        # destination-sized == full-size (all nodes in one index space)
+        full = RelLightGCN([("all", "all"), ("all", "all")], num_layers=1)
+        full.set_graph([(src, dst + 3), (dst + 3, src)], {"all": 6})
+        gf, _ = full({"all": torch.cat([h0["user"], h0["video"]])})
+        assert torch.allclose(gf["all"], torch.cat([g["user"], g["video"]]), atol=1e-6)
+
+    def test_snapshot_degrees_from_masked_edges(self, hug_data):
+        import hug_train
+        args = _hug_args()
+        model = _hug_model(args, hug_data)
+        snaps = hug_train.Snapshots(hug_data, model, torch.device("cpu"))
+        ei_all, et_all, t_all = hug_data.store.rel_master
+        for k in sorted(hug_data.store.video_x)[:4]:
+            snaps.enter(int(k))
+            keep = t_all < hug_data.boundaries[k]
+            for r, (st, dt) in enumerate(model.gcn.relations):
+                m = keep & (et_all == r)
+                n_dst = snaps.counts[dt]
+                exp_deg = torch.bincount(ei_all[1, m] - snaps.offsets[dt], minlength=n_dst)
+                adj = model.gcn._adj[r]
+                assert adj._nnz() <= int(m.sum())
+                got = torch.zeros(n_dst, dtype=torch.long)
+                if adj._nnz():
+                    # weights are 1/sqrt(deg_dst*deg_src); recover per-dst edge multiplicity
+                    src = ei_all[0, m] - snaps.offsets[st]
+                    deg_src = torch.bincount(src, minlength=snaps.counts[st]).float()
+                    w = adj.to_dense()
+                    got = (w * deg_src.unsqueeze(0).sqrt()).sum(1).pow(2).round().long()
+                assert torch.equal(got, exp_deg), (k, r)
+
+    def test_vocab_from_training_window(self, loaded_data, timed_bundle):
+        import hug_train
+        # make video 0 appear only at/after t_val, many times
+        d0 = hug_train.prepare(_hug_args(), data=loaded_data, bundle=timed_bundle)
+        t_val = d0.inter.t_val
+        data = _rewrite_after(loaded_data, 10**18)          # deep copy of frames
+        for name in ("log_combined", "session_map"):
+            df = getattr(data, name)
+            vid = df["video_id"].values.copy()
+            vid[vid == 0] = 1                              # remove video 0 everywhere …
+            late = np.flatnonzero(df["time_ms"].values >= t_val)[:10]
+            vid[late] = 0                                  # … then add it 10× after t_val
+            df["video_id"] = vid
+        d = hug_train.prepare(_hug_args(), data=data, bundle=timed_bundle)
+        v0 = data.video_id_map[0]
+        assert d.node_data["video_vocab"][v0] == 0          # OOV despite 10 >= min_id_count
+
+    def test_weights_independent_of_val_test(self, loaded_data, timed_bundle, tmp_path):
+        import hug_train
+        from runtime import set_determinism
+
+        def fit(data, sub):
+            args = _hug_args(patience=10)
+            d = hug_train.prepare(args, data=data, bundle=HKGConstructor(data).build())
+            set_determinism(0)
+            model = hug_train.build(args, d)
+            (tmp_path / sub).mkdir()
+            hug_train.train(args, d, model, torch.device("cpu"), tmp_path / sub)
+            return model.state_dict(), d
+
+        base, d = fit(loaded_data, "a")
+        other, _ = fit(_rewrite_after(loaded_data, d.inter.t_val), "b")
+        for k in base:
+            assert torch.equal(base[k], other[k]), k
+
+    def test_predictions_invariant_to_future(self, loaded_data, timed_bundle):
+        import hug_train
+        args = _hug_args()
+        d = hug_train.prepare(args, data=loaded_data, bundle=timed_bundle)
+        T = int(np.quantile(d.inter.time[d.val_rows], 0.5))
+        torch.manual_seed(0)
+        model = hug_train.build(args, d)
+
+        def scores(dd):
+            m2 = hug_train.build(args, dd)
+            m2.load_state_dict(model.state_dict())
+            snaps = hug_train.Snapshots(dd, m2, torch.device("cpu"))
+            rows = dd.val_rows
+            r, s = hug_train.predict(m2, dd, rows, snaps, hug_train.HugBatcher(dd, args.max_seq_len),
+                                     64, torch.device("cpu"), True, "x")
+            return pd.Series(s, index=r).sort_index()
+
+        data2 = _rewrite_after(loaded_data, T)
+        d2 = hug_train.prepare(args, data=data2, bundle=HKGConstructor(data2).build())
+        a, b = scores(d), scores(d2)
+        early = d.inter.time[a.index.values] < T
+        assert early.any() and (~early).any()
+        np.testing.assert_array_equal(a.values[early], b.values[early])
+        assert not np.allclose(a.values[~early], b.values[~early])
+
+    def test_contrastive_uses_batch_nodes_and_zero_weight(self, hug_data, monkeypatch):
+        import hug, hug_train
+        args = _hug_args()
+        model = _hug_model(args, hug_data)
+        snaps = hug_train.Snapshots(hug_data, model, torch.device("cpu"))
+        b = hug_train.HugBatcher(hug_data, args.max_seq_len)(hug_data.train_rows[:64])
+        vx = snaps.enter(int(hug_data.snap[hug_data.train_rows[0]]))
+        seen = []
+        orig = hug.info_nce
+        monkeypatch.setattr(hug, "info_nce", lambda z1, z2, t: seen.append(len(z1)) or orig(z1, z2, t))
+        model.train()
+        torch.manual_seed(0)
+        model(b, vx, model.graph_tables(vx, train=True), train=True)
+        assert seen == [len(torch.unique(b["user"])), len(torch.unique(b["video"]))]
+
+        args0 = _hug_args(cl_weight=0)
+        m0 = _hug_model(args0, hug_data)
+        m0.train()
+        out = m0(b, vx, m0.graph_tables(vx, train=True), train=True)
+        touched = torch.cat([b["video"], b["hist"][b["hist"] >= 0]])
+        l2 = m0.emb_l2 * m0.inp.l2_touched(b["user"], touched) / len(b["user"])
+        assert torch.equal(out["loss"], out["bce"] + l2) or torch.allclose(out["loss"], out["bce"] + l2, atol=0, rtol=0)
+
+    def test_eval_deterministic(self, hug_data):
+        import hug_train
+        args = _hug_args()
+        model = _hug_model(args, hug_data)
+        snaps = hug_train.Snapshots(hug_data, model, torch.device("cpu"))
+        bat = hug_train.HugBatcher(hug_data, args.max_seq_len)
+        r1, s1 = hug_train.predict(model, hug_data, hug_data.val_rows, snaps, bat, 64, torch.device("cpu"), True, "a")
+        r2, s2 = hug_train.predict(model, hug_data, hug_data.val_rows, snaps, bat, 64, torch.device("cpu"), True, "b")
+        assert np.array_equal(r1, r2) and np.array_equal(s1, s2)
+
+    def test_asof_statistics_strictly_earlier_with_ties(self):
+        from features import asof_video_statistics, VIDEO_STAT_COLS, FEEDBACK_COLS
+        rng = np.random.default_rng(0)
+        n = 300
+        fr = pd.DataFrame({"video_id": rng.integers(0, 5, n), "time_ms": rng.integers(0, 40, n)})
+        for c in FEEDBACK_COLS:
+            fr[c] = rng.integers(0, 2, n)
+        got = asof_video_statistics(fr)
+        for i in range(n):
+            past = fr[(fr.video_id == fr.video_id[i]) & (fr.time_ms < fr.time_ms[i])]
+            show = len(past)
+            assert got[i, VIDEO_STAT_COLS.index("show_cnt_log")] == pytest.approx(np.log1p(show), abs=1e-6)
+            assert got[i, VIDEO_STAT_COLS.index("play_cnt_log")] == pytest.approx(np.log1p(past.is_click.sum()), abs=1e-6)
+            cvr = past.long_view.sum() / show if show else 0.0
+            assert got[i, VIDEO_STAT_COLS.index("global_cvr")] == pytest.approx(cvr, abs=1e-6)
+
+    def test_holdout_disjoint_and_excluded(self, hug_data):
+        from features import holdout_rows
+        it = hug_data.inter
+        train_all = it.rows(SPLIT_TRAIN)
+        assert set(hug_data.holdout) <= set(train_all)
+        assert np.array_equal(hug_data.holdout, holdout_rows(train_all, 0.05, 0))
+        assert not set(hug_data.holdout) & set(hug_data.train_rows)
+
+    def test_resume_is_exact(self, hug_data, tmp_path):
+        import hug_train
+        from runtime import set_determinism
+
+        def go(sub, epochs, resume=False):
+            args = _hug_args(patience=10, max_epochs=epochs, resume=resume)
+            set_determinism(0)
+            model = hug_train.build(args, hug_data)
+            state = hug_train.train(args, hug_data, model, torch.device("cpu"), tmp_path / sub)
+            return model.state_dict(), state
+
+        (tmp_path / "straight").mkdir(); (tmp_path / "resumed").mkdir()
+        a, sa = go("straight", 3)
+        go("resumed", 1)
+        b, sb = go("resumed", 3, resume=True)
+        for k in a:
+            assert torch.equal(a[k], b[k]), k
+        assert sa["best_epoch"] == sb["best_epoch"]
+        assert [h["val"]["auc"] for h in sa["history"]] == [h["val"]["auc"] for h in sb["history"]]
+
+    def test_test_guard(self, tmp_path):
+        from test_guard import TestAccessDenied, authorize_test_access
+        with pytest.raises(TestAccessDenied):
+            authorize_test_access(tmp_path, None, False, "job", "h")
+        with pytest.raises(TestAccessDenied):
+            authorize_test_access(tmp_path, "bogus", False, "job", "h")
+        (tmp_path / ".test_tokens").mkdir()
+        (tmp_path / ".test_tokens" / "tok").write_text("")
+        authorize_test_access(tmp_path, "tok", False, "job", "h")
+        with pytest.raises(TestAccessDenied):                      # one-time
+            authorize_test_access(tmp_path, "tok", False, "job", "h")
+        authorize_test_access(tmp_path, None, True, "manual", "h2")
+        log = (tmp_path / "test_access.log").read_text().splitlines()
+        assert len(log) == 2 and "token" in log[0] and "manual-override" in log[1]
+
+    def test_main_refuses_eval_test_without_token(self, tmp_path):
+        import hug_train
+        from test_guard import TestAccessDenied
+        args = _hug_args(eval_test=True, run_dir=str(tmp_path / "job"))
+        with pytest.raises(TestAccessDenied):
+            hug_train.run(args)
+
+    def test_hug_module_dataset_agnostic(self):
+        import inspect, hug, data_loader, features
+        src = inspect.getsource(hug)
+        names = set(data_loader.KuaiRandLoader.LOG_USECOLS) | set(features.USER_CAT_COLS) \
+            | set(features.VIDEO_CAT_COLS) | set(features.VIDEO_STAT_COLS) | set(features.FEEDBACK_COLS) \
+            | {"tab", "music_id", "author_id", "kuairand", "KuaiRand"}
+        hits = [n for n in names if f'"{n}"' in src or f"'{n}'" in src or n.lower() in src.lower().split()]
+        assert not hits, hits
+
+    @pytest.mark.parametrize("flags", [
+        {}, {"no_graph": True}, {"no_seq": True}, {"no_graph": True, "no_seq": True},
+        {"freeze_graph": True}, {"cl_weight": 0}, {"graph_tokens": True},
+    ])
+    def test_arm_flags(self, loaded_data, timed_bundle, flags):
+        import hug_train
+        args = _hug_args(**flags)
+        d = hug_train.prepare(args, data=loaded_data, bundle=timed_bundle)
+        model = hug_train.build(args, d)
+        assert (model.gcn is None) == bool(flags.get("no_graph"))
+        assert (model.seq is None) == bool(flags.get("no_seq"))
+        if flags.get("no_graph"):
+            assert d.store.rel_master[0].shape[1] == 0           # no snapshot matrices
+        snaps = hug_train.Snapshots(d, model, torch.device("cpu"))
+        b = hug_train.HugBatcher(d, args.max_seq_len)(d.train_rows[:32])
+        vx = snaps.enter(int(d.snap[d.train_rows[0]]))
+        model.train()
+        tables = model.graph_tables(vx, train=True) if model.gcn is not None else None
+        out = model(b, vx, tables, train=True)
+        out["loss"].backward()
+        assert torch.isfinite(out["loss"])
