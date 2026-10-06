@@ -257,6 +257,8 @@ class HUGModel(nn.Module):
         freeze_graph: bool = False,
         graph_tokens: bool = False,
         dropout:      float = 0.1,
+        fusion:       str = "concat",
+        fusion_args=None,
     ) -> None:
         super().__init__()
         self.inp, self.gcn, self.seq = inp, gcn, seq
@@ -266,13 +268,15 @@ class HUGModel(nn.Module):
         self.freeze_graph = freeze_graph
         self.graph_tokens = graph_tokens and gcn is not None
         self.ctx_emb = nn.ModuleList([_emb(v, 16) for v in ctx_vocab])
-        z_dim = 3 * d + (2 * d if seq is not None else 0) + 16 * len(ctx_vocab) + ctx_num_dim
-        layers, prev = [], z_dim
-        for h in (256, 128):
-            layers += [nn.Linear(prev, h), nn.LayerNorm(h), nn.ReLU(), nn.Dropout(dropout)]
-            prev = h
-        layers.append(nn.Linear(prev, 1))
-        self.head = nn.Sequential(*layers)
+        # Fusion head (spec 05).  'concat' is the spec 03 MLP, built at the same point so
+        # parameter init and names are unchanged.
+        from fusion import build_fusion
+        if fusion != "concat" and (gcn is None or seq is None):
+            raise ValueError(f"--fusion {fusion} needs both views; drop --no-graph/--no-seq")
+        self.fusion = fusion
+        ctx_dim = 16 * len(ctx_vocab) + ctx_num_dim
+        self.head = build_fusion(fusion, 3 * d, 2 * d if seq is not None else None, ctx_dim,
+                                 fusion_args if fusion_args is not None else _ConcatOnly(dropout))
 
     # graph tables ------------------------------------------------------------
     def graph_tables(self, video_x: Tensor, train: bool) -> dict:
@@ -314,14 +318,14 @@ class HUGModel(nn.Module):
             tok = self.inp.videos(video_x, hidx) if self.seq is not None else None
             q = v
 
-        parts = [u, v, u * v]
-        if self.seq is not None:
-            parts.append(self.seq(tok, hmask, batch["hist_rank"], batch["hist_gap"],
-                                  batch["hist_sess"], q))
-        parts += [e(batch["ctx_cat"][:, i]) for i, e in enumerate(self.ctx_emb)]
-        parts.append(batch["ctx_num"])
-        logit = self.head(torch.cat(parts, dim=-1)).squeeze(-1)
-        out = {"logit": logit, "proba": torch.sigmoid(logit)}
+        e_G = torch.cat([u, v, u * v], dim=-1)
+        e_S = (self.seq(tok, hmask, batch["hist_rank"], batch["hist_gap"], batch["hist_sess"], q)
+               if self.seq is not None else None)
+        ctx = torch.cat([e(batch["ctx_cat"][:, i]) for i, e in enumerate(self.ctx_emb)]
+                        + [batch["ctx_num"]], dim=-1)
+        fused = self.head.fuse(e_G, e_S, ctx, batch.get("evidence"))
+        logit = fused["logit"]
+        out = {"logit": logit, "proba": torch.sigmoid(logit), "stats": fused["stats"]}
 
         if "label" in batch:
             bce = F.binary_cross_entropy_with_logits(logit, batch["label"].float())
@@ -329,11 +333,21 @@ class HUGModel(nn.Module):
             if self.emb_l2 > 0:
                 touched_v = torch.cat([video, hist[hmask]])
                 loss = loss + self.emb_l2 * self.inp.l2_touched(user, touched_v) / len(user)
+            aux = fused["aux_loss"].detach()
+            if self.fusion != "concat":
+                loss = loss + fused["aux_loss"]
             cl = torch.zeros((), device=logit.device)
             if train and self.cl_weight > 0 and tables is not None and tables["h_cl"]:
                 for t, idx in (("user", user), ("video", video)):
                     nodes = torch.unique(idx)
                     cl = cl + info_nce(tables["g"][t][nodes], tables["h_cl"][t][nodes], self.cl_temp)
                 loss = loss + self.cl_weight * cl
-            out.update(loss=loss, bce=bce.detach(), cl=cl.detach())
+            out.update(loss=loss, bce=bce.detach(), cl=cl.detach(), aux=aux)
         return out
+
+
+class _ConcatOnly:
+    """Minimal argument holder for the default concat head."""
+
+    def __init__(self, dropout: float) -> None:
+        self.dropout = dropout

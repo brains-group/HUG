@@ -182,3 +182,58 @@ def holdout_rows(train_rows: np.ndarray, frac: float = 0.05, seed: int = 0) -> n
     train_rows = np.asarray(train_rows, np.int64)
     k = int(round(frac * len(train_rows)))
     return np.sort(np.random.default_rng(seed).choice(train_rows, size=k, replace=False))
+
+
+# ── Evidence counts for fusion (spec 05) ──────────────────────────────────────
+
+# Primary metadata neighbour(s) of an item, declared per dataset.  The graph
+# view's evidence uses the as-of interaction count of these neighbours (max
+# over the list).  KuaiRand: the author.
+METADATA_NEIGHBOURS = ["author_id"]
+
+
+def asof_group_count(group: np.ndarray, time: np.ndarray) -> np.ndarray:
+    """For each row: rows of the same group with a strictly earlier timestamp."""
+    group, time = np.asarray(group, np.int64), np.asarray(time, np.int64)
+    t0, span = int(time.min()), int(time.max() - time.min()) + 1
+    keys = np.sort(group * span + (time - t0))
+    return (np.searchsorted(keys, group * span + (time - t0), "left")
+            - np.searchsorted(keys, group * span, "left")).astype(np.int64)
+
+
+def metadata_evidence(frame: pd.DataFrame, item_meta: pd.DataFrame) -> np.ndarray:
+    """
+    log1p of the as-of interaction count of each row's item's primary metadata
+    neighbour(s) (METADATA_NEIGHBOURS; max over them).  `item_meta` maps
+    video_id to the neighbour columns.
+    """
+    m = frame[["video_id"]].merge(item_meta[["video_id"] + METADATA_NEIGHBOURS],
+                                  on="video_id", how="left")
+    t = frame["time_ms"].to_numpy(np.int64)
+    out = np.zeros(len(frame), dtype=np.int64)
+    for col in METADATA_NEIGHBOURS:
+        codes = pd.factorize(m[col].fillna(-1))[0]
+        out = np.maximum(out, asof_group_count(codes, t))
+    return np.log1p(out).astype(np.float32)
+
+
+def view_evidence(frame: pd.DataFrame, item_meta: pd.DataFrame, user: np.ndarray,
+                  click: np.ndarray) -> np.ndarray:
+    """
+    Per-row causal evidence for each view, float32 [N, 2]:
+      n_G = log1p(item prior interactions) + metadata_evidence
+      n_S = log1p(user prior clicks)       + log1p(item prior interactions)
+    Every count uses rows with a strictly earlier timestamp (ties excluded).
+    """
+    t = frame["time_ms"].to_numpy(np.int64)
+    item_prior = np.log1p(asof_group_count(pd.factorize(frame["video_id"])[0], t))
+    clicked = np.asarray(click) == 1
+    # user prior clicks: as-of count over clicked rows only
+    user = np.asarray(user, np.int64)
+    span = int(t.max() - t.min()) + 1
+    ck = np.sort(user[clicked] * span + (t[clicked] - t.min()))
+    user_prior = (np.searchsorted(ck, user * span + (t - t.min()), "left")
+                  - np.searchsorted(ck, user * span, "left"))
+    n_g = item_prior + metadata_evidence(frame, item_meta)
+    n_s = np.log1p(user_prior) + item_prior
+    return np.stack([n_g, n_s], axis=1).astype(np.float32)

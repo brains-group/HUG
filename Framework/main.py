@@ -593,6 +593,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="arm switch: graph propagation under no_grad, uniform relation weights, no CL")
     h.add_argument("--graph-tokens", action="store_true",
                    help="optional G-tok arm: history tokens are graph outputs instead of h0")
+    f = p.add_argument_group("fusion (spec 05)")
+    f.add_argument("--fusion", default="concat",
+                   choices=["concat", "gate", "evgate", "moe", "misa", "sparse"])
+    f.add_argument("--fusion-dim", type=int, default=64)
+    f.add_argument("--m-shared", type=int, default=256)
+    f.add_argument("--m-private", type=int, default=256)
+    f.add_argument("--k-shared", type=int, default=16)
+    f.add_argument("--k-private-min", type=int, default=4)
+    f.add_argument("--k-private-max", type=int, default=48)
+    f.add_argument("--k-schedule", default="adaptive", choices=["adaptive", "fixed"])
+    f.add_argument("--k-private-fixed", type=int, default=24)
+    f.add_argument("--w-rec", type=float, default=1.0)
+    f.add_argument("--w-align", type=float, default=0.1)
+    f.add_argument("--w-dec", type=float, default=0.1)
+    f.add_argument("--gate-hidden", type=int, default=64)
+    f.add_argument("--moe-experts", type=int, default=4)
+    f.add_argument("--init-from", default=None,
+                   help="warm-start input layer + encoders from an N4 checkpoint (disclosed if used)")
     h.add_argument("--resume", action="store_true", help="continue from <run-dir>/last.pt")
     h.add_argument("--checkpoint", type=str, default=None, help="weights for --eval-only")
     h.add_argument("--max-steps", type=int, default=0,

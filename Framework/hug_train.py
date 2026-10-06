@@ -31,8 +31,8 @@ import torch
 
 from data_loader import SPLIT_TEST, SPLIT_TRAIN, SPLIT_VAL, KuaiRandData, KuaiRandLoader
 from features import (
-    HUG_VIDEO_CAT_COLS, asof_video_statistics, bucket_keys, click_history,
-    holdout_rows, hour_of_day, video_categoricals,
+    HUG_VIDEO_CAT_COLS, METADATA_NEIGHBOURS, asof_video_statistics, bucket_keys, click_history,
+    holdout_rows, hour_of_day, video_categoricals, view_evidence,
 )
 from hkg_constructor import HKG_BUILD_VERSION, HKGBundle, HKGConstructor
 from hug import HistoryTransformer, HUGModel, InputEncoder, RelLightGCN
@@ -63,6 +63,10 @@ def hug_relations():
 
 
 def arm_name(args) -> str:
+    fusion = getattr(args, "fusion", "concat")
+    if fusion != "concat":
+        suffix = "-fixed" if fusion == "sparse" and args.k_schedule == "fixed" else ""
+        return f"N4-{fusion}{suffix}"
     if args.no_graph and args.no_seq:
         return "N0"
     if args.no_graph:
@@ -100,6 +104,7 @@ class HugData:
     vocab:      dict                    # sizes and OOV shares
     fingerprint: dict
     video_cat_raw: object = None        # shared categorical strings per video (node order)
+    evidence:   np.ndarray | None = None  # [N, 2] causal per-view evidence (n_G, n_S)
 
 
 def _vocab(counts: np.ndarray, m: int) -> np.ndarray:
@@ -147,6 +152,9 @@ def prepare(args, data: KuaiRandData | None = None, bundle: HKGBundle | None = N
     hour = hour_of_day(inter.time)
     ctx_cat = np.stack([tab, hour], axis=1)
     ctx_num = asof_video_statistics(frame)
+    # Per-view evidence for fusion heads (spec 05): strictly earlier counts only
+    item_meta = data.video_basic[["video_id"] + METADATA_NEIGHBOURS]
+    evidence = view_evidence(frame, item_meta, inter.user, inter.label)
 
     # Vocabularies from the training window only (time < t_val)
     tw = inter.time < t_val
@@ -218,6 +226,7 @@ def prepare(args, data: KuaiRandData | None = None, bundle: HKGBundle | None = N
         store=store, bundle=bundle, node_data=node_data, vocab=vocab,
         fingerprint=data_fingerprint(inter),
         video_cat_raw=vc.reset_index(drop=True),
+        evidence=evidence,
     )
 
 
@@ -240,6 +249,7 @@ class HugBatcher:
         self.hrow  = torch.from_numpy(d.hist_seq)
         self.ctx_cat = torch.from_numpy(d.ctx_cat)
         self.ctx_num = torch.from_numpy(d.ctx_num)
+        self.evidence = torch.from_numpy(d.evidence) if d.evidence is not None else None
         self.offsets = torch.arange(-max_len, 0)
         self.rank = torch.arange(max_len - 1, -1, -1)
 
@@ -257,6 +267,7 @@ class HugBatcher:
             "hist_gap": torch.where(ok, gap, torch.zeros_like(gap)),
             "hist_sess": torch.where(ok, same, torch.zeros_like(same)),
             "ctx_cat": self.ctx_cat[r], "ctx_num": self.ctx_num[r],
+            **({"evidence": self.evidence[r]} if self.evidence is not None else {}),
         }
 
 
@@ -280,10 +291,15 @@ def build(args, d: HugData) -> HUGModel:
     seq = None if args.no_seq else HistoryTransformer(args.emb_dim, args.seq_layers,
                                                       args.max_seq_len, dropout=args.dropout)
     ctx_vocab = [int(d.ctx_cat[:, i].max()) + 1 for i in range(d.ctx_cat.shape[1])]
-    return HUGModel(inp, gcn, seq, ctx_vocab, d.ctx_num.shape[1], args.emb_dim,
-                    cl_weight=args.cl_weight, cl_temp=args.cl_temp, emb_l2=args.emb_l2,
-                    freeze_graph=args.freeze_graph, graph_tokens=args.graph_tokens,
-                    dropout=args.dropout)
+    model = HUGModel(inp, gcn, seq, ctx_vocab, d.ctx_num.shape[1], args.emb_dim,
+                     cl_weight=args.cl_weight, cl_temp=args.cl_temp, emb_l2=args.emb_l2,
+                     freeze_graph=args.freeze_graph, graph_tokens=args.graph_tokens,
+                     dropout=args.dropout, fusion=args.fusion, fusion_args=args)
+    if hasattr(model.head, "n_ref"):
+        # 95th percentile of each view's evidence over training rows only
+        ref = np.percentile(d.evidence[d.train_rows], 95, axis=0)
+        model.head.n_ref.copy_(torch.as_tensor(np.maximum(ref, 1e-6), dtype=torch.float32))
+    return model
 
 
 def param_counts(model: HUGModel) -> dict:
@@ -323,6 +339,82 @@ class Snapshots:
         return self.video_x
 
 
+# ── Fusion statistics (spec 05 B8) ────────────────────────────────────────────
+
+VAL_CODE_SAMPLE = 200_000
+
+
+class FusionStats:
+    """
+    Accumulates sparse-fusion diagnostics over an eval pass: per-row ρ and active
+    counts, shared-atom co-activation, per-row Jaccard of the views' shared sets,
+    and the codes of a fixed row sample (seed 0) for val_codes.npz.
+    """
+
+    def __init__(self, m_shared: int, sample_rows: np.ndarray) -> None:
+        self.rows, self.rho, self.active = [], [], {k: [] for k in
+                                                     ("sh_G", "sh_S", "pr_G", "pr_S")}
+        self.fire_any = np.zeros(m_shared, dtype=np.int64)
+        self.fire_both = np.zeros(m_shared, dtype=np.int64)
+        self.jaccard = []
+        self.sample = set(np.asarray(sample_rows).tolist())
+        self.codes = {k: [] for k in ("row_id", "sh_G", "sh_S", "pr_G", "pr_S")}
+
+    def add(self, rows: np.ndarray, stats: dict, codes: dict) -> None:
+        self.rows.append(rows)
+        self.rho.append(stats["rho"].cpu().numpy())
+        for k in self.active:
+            self.active[k].append(stats[f"active_{k}"].cpu().numpy())
+        g, s_ = codes["sh_G"] > 0, codes["sh_S"] > 0
+        self.fire_any += (g | s_).sum(0).cpu().numpy()
+        self.fire_both += (g & s_).sum(0).cpu().numpy()
+        inter, union = (g & s_).sum(-1).float(), (g | s_).sum(-1).float()
+        self.jaccard.append((inter / union.clamp_min(1)).cpu().numpy())
+        keep = np.array([r in self.sample for r in rows])
+        if keep.any():
+            self.codes["row_id"].append(rows[keep])
+            for k in ("sh_G", "sh_S", "pr_G", "pr_S"):
+                self.codes[k].append(codes[k][torch.from_numpy(keep).to(codes[k].device)].cpu())
+
+    def summary(self, d: HugData) -> dict:
+        rows = np.concatenate(self.rows)
+        rho = np.concatenate(self.rho)
+        out = {"rho_mean": float(rho.mean())}
+        buckets = dict(d.buckets)
+        for i, v in enumerate(("G", "S")):
+            q = np.quantile(d.evidence[d.train_rows, i], [0.2, 0.4, 0.6, 0.8])
+            buckets[f"n_{v}_quintile"] = np.searchsorted(q, d.evidence[:, i], side="right").astype(str)
+        out["rho_by_bucket"] = {name: {k: float(rho[keys[rows] == k].mean())
+                                       for k in np.unique(keys[rows])}
+                                for name, keys in buckets.items()}
+        act = {k: np.concatenate(v) for k, v in self.active.items()}
+        out["active_by_evidence_quintile"] = {
+            name: {k: {b: float(a[keys[rows] == k].mean()) for b, a in act.items()}
+                   for k in np.unique(keys[rows])}
+            for name, keys in buckets.items() if name.startswith("n_")}
+        out["active_mean"] = {b: float(a.mean()) for b, a in act.items()}
+        fired = self.fire_any > 0
+        co = np.zeros_like(self.fire_any, dtype=float)
+        co[fired] = self.fire_both[fired] / self.fire_any[fired]
+        out["shared_coactivation_fraction"] = float((co >= 0.01)[fired].mean()) if fired.any() else 0.0
+        out["shared_never_fired_fraction"] = float((~fired).mean())
+        out["shared_jaccard_mean"] = float(np.concatenate(self.jaccard).mean())
+        return out
+
+    def save_codes(self, path: Path) -> None:
+        """Nonzero indices and values per block for the sampled rows."""
+        if not self.codes["row_id"]:
+            return
+        out = {"row_id": np.concatenate(self.codes["row_id"])}
+        for k in ("sh_G", "sh_S", "pr_G", "pr_S"):
+            c = torch.cat(self.codes[k])
+            kmax = int((c > 0).sum(-1).max())
+            vals, idx = c.topk(max(kmax, 1), dim=-1)
+            out[f"{k}_idx"] = torch.where(vals > 0, idx, torch.full_like(idx, -1)).numpy()
+            out[f"{k}_val"] = vals.numpy().astype(np.float32)
+        np.savez(path, **out)
+
+
 # ── Train / eval ──────────────────────────────────────────────────────────────
 
 def _to(batch: dict, device) -> dict:
@@ -332,7 +424,8 @@ def _to(batch: dict, device) -> dict:
 @torch.no_grad()
 def predict(model: HUGModel, d: HugData, rows: np.ndarray, snaps: Snapshots,
             batcher: HugBatcher, batch_size: int, device, quiet: bool,
-            desc: str, max_snapshots: int | None = None) -> tuple[np.ndarray, np.ndarray]:
+            desc: str, max_snapshots: int | None = None,
+            fstats: FusionStats | None = None) -> tuple[np.ndarray, np.ndarray]:
     """Scores for `rows` (returned in the order of the returned row array)."""
     model.eval()
     out_rows, out_scores = [], []
@@ -347,16 +440,20 @@ def predict(model: HUGModel, d: HugData, rows: np.ndarray, snaps: Snapshots,
         for b0 in range(0, len(sel), batch_size):
             b = _to(batcher(sel[b0:b0 + batch_size]), device)
             b.pop("label")
-            out_scores.append(model(b, vx, tables)["proba"].float().cpu().numpy())
+            out = model(b, vx, tables)
+            out_scores.append(out["proba"].float().cpu().numpy())
             out_rows.append(sel[b0:b0 + batch_size])
+            if fstats is not None:
+                fstats.add(out_rows[-1], out["stats"], model.head._last["codes"])
             prog.update(len(out_rows[-1]))
     prog.close()
     return np.concatenate(out_rows), np.concatenate(out_scores)
 
 
-def evaluate(split, model, d, rows, snaps, batcher, args, device, max_snapshots=None):
+def evaluate(split, model, d, rows, snaps, batcher, args, device, max_snapshots=None,
+             fstats: FusionStats | None = None):
     r, s = predict(model, d, rows, snaps, batcher, args.batch_size * 2, device,
-                   is_quiet(args.quiet), split, max_snapshots)
+                   is_quiet(args.quiet), split, max_snapshots, fstats)
     labels = d.inter.label[r]
     eps = 1e-7
     loss = float(-np.mean(labels * np.log(np.clip(s, eps, 1)) + (1 - labels) * np.log(np.clip(1 - s, eps, 1))))
@@ -417,7 +514,8 @@ def train(args, d: HugData, model: HUGModel, device, run_dir: Path) -> dict:
         epoch = state["epoch"] + 1
         t0 = time.time()
         model.train()
-        tot, n_seen, cl_tot = 0.0, 0, 0.0
+        tot, n_seen, cl_tot, aux_tot = 0.0, 0, 0.0, 0.0
+        dead, kp_sum = {}, {"G": 0.0, "S": 0.0}
         prog = Progress(len(d.train_rows), f"train e{epoch}", quiet)
         for k in np.random.permutation(train_snaps):
             sel = np.random.permutation(d.train_rows[d.snap[d.train_rows] == k])
@@ -430,9 +528,16 @@ def train(args, d: HugData, model: HUGModel, device, run_dir: Path) -> dict:
                 out["loss"].backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
                 opt.step()
+                if hasattr(model.head, "renormalize"):
+                    model.head.renormalize()
+                    dead = model.head.track_and_resample(state["steps"] + 1)
                 n = len(b["user"])
                 tot += out["bce"].item() * n
                 cl_tot += out["cl"].item() * n
+                aux_tot += out["aux"].item() * n
+                if "active_pr_G" in out["stats"]:
+                    kp_sum["G"] += out["stats"]["active_pr_G"].float().sum().item()
+                    kp_sum["S"] += out["stats"]["active_pr_S"].float().sum().item()
                 n_seen += n
                 state["steps"] += 1
                 prog.update(n)
@@ -448,10 +553,14 @@ def train(args, d: HugData, model: HUGModel, device, run_dir: Path) -> dict:
         val_m, _ = evaluate("val", model, d, d.val_rows, snaps, batcher, args, device, max_snaps)
         sched.step(val_m.auc)
         rec = {"epoch": epoch, "train_bce": tot / max(n_seen, 1), "train_cl": cl_tot / max(n_seen, 1),
+               "train_aux": aux_tot / max(n_seen, 1),
                "val": asdict(val_m), "lr": opt.param_groups[0]["lr"],
                "seconds": round(time.time() - t0, 1)}
         if model.gcn is not None and not model.freeze_graph:
             rec["relation_weights"] = model.gcn.relation_weights().cpu().tolist()
+        if hasattr(model.head, "renormalize"):
+            rec["dead_atom_fraction"] = dead
+            rec["mean_k_private"] = {v: kp_sum[v] / max(n_seen, 1) for v in kp_sum}
         state["history"].append(rec)
         logger.info("epoch %d  train_bce=%.4f  cl=%.4f  %s  (%.0fs)", epoch, rec["train_bce"],
                     rec["train_cl"], val_m, rec["seconds"])
@@ -502,8 +611,19 @@ def run(args) -> None:
     batcher = HugBatcher(d, args.max_seq_len)
     snaps = Snapshots(d, model, device)
     max_snaps = 2 if args.max_steps else None
-    val_m, val_p = evaluate("val", model, d, d.val_rows, snaps, batcher, args, device, max_snaps)
+    fstats = None
+    if getattr(model, "fusion", "concat") == "sparse":
+        sample = np.sort(np.random.default_rng(0).choice(
+            d.val_rows, size=min(VAL_CODE_SAMPLE, len(d.val_rows)), replace=False))
+        fstats = FusionStats(model.head.m_sh, sample)
+    val_m, val_p = evaluate("val", model, d, d.val_rows, snaps, batcher, args, device, max_snaps,
+                            fstats)
     np.savez(run_dir / "val_preds.npz", **val_p)
+    fusion_stats = None
+    if fstats is not None:
+        fusion_stats = fstats.summary(d)
+        fstats.save_codes(run_dir / "val_codes.npz")
+        logger.info("Fusion stats: %s", {k: v for k, v in fusion_stats.items() if not isinstance(v, dict)})
     hold_m, _ = evaluate("holdout", model, d, d.holdout, snaps, batcher, args, device, max_snaps)
     test_m = None
     dry_substitute = bool(args.eval_test and args.max_steps)
@@ -532,6 +652,8 @@ def run(args) -> None:
     }
     if model.gcn is not None:
         out["relation_weights"] = model.gcn.relation_weights().cpu().tolist()
+    if fusion_stats is not None:
+        out["fusion_stats"] = fusion_stats
     (run_dir / "final_metrics.json").write_text(json.dumps(out, indent=2, default=float))
     if not args.eval_only and (run_dir / "last.pt").exists():
         (run_dir / "last.pt").unlink()
