@@ -37,7 +37,7 @@ from features import (
 from hkg_constructor import HKG_BUILD_VERSION, HKGBundle, HKGConstructor
 from hug import HistoryTransformer, HUGModel, InputEncoder, RelLightGCN
 from metrics import Metrics, compute_metrics
-from runtime import Progress, is_quiet, log_versions, set_determinism
+from runtime import Progress, git_state, is_quiet, log_versions, set_determinism
 from temporal import (
     Interactions, SnapshotStore, assign_snapshots, build_interactions, snapshot_boundaries,
 )
@@ -528,6 +528,7 @@ def run(args) -> None:
         "n_params": counts, "vocab": d.vocab, "fingerprint": d.fingerprint,
         "encode": None, "checkpoint_mb": round(ckpt.stat().st_size / 1e6, 1) if ckpt.exists() else None,
         "environment": versions, "hkg_build_version": HKG_BUILD_VERSION,
+        "git": git_state(),
     }
     if model.gcn is not None:
         out["relation_weights"] = model.gcn.relation_weights().cpu().tolist()

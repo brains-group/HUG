@@ -578,3 +578,34 @@ class TestAggregation:
         out = agg.aggregate(root, n_boot=10)
         assert "0.7000" in (out / "val_table.md").read_text()
         assert "No final_eval results" in (out / "test_table.md").read_text()
+
+
+
+class TestCodeCompatHash:
+    """Spec 05 §0: code changes don't invalidate jobs; CODE_COMPAT_VERSION does."""
+
+    def _repo(self, tmp_path, version: int, extra: str = "") -> Path:
+        (tmp_path / "Framework").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "Framework" / "runtime.py").write_text(
+            f"import os\n\nCODE_COMPAT_VERSION = {version}\n{extra}")
+        (tmp_path / "Framework" / "hug.py").write_text("x = 1\n" + extra)
+        return tmp_path
+
+    def test_hash_ignores_code_change_and_tracks_compat_version(self, tmp_path):
+        args = ["--model-type", "hug", "--seed", "42"]
+        h = lambda root: rq.config_hash(args, rq.code_compat_key(root), "data-a")
+        base = h(self._repo(tmp_path, 1))
+        assert h(self._repo(tmp_path, 1, extra="y = 2  # new fusion head\n")) == base
+        assert h(self._repo(tmp_path, 2)) != base
+
+    def test_finished_job_survives_code_change(self, tmp_path):
+        repo = self._repo(tmp_path / "repo", 1)
+        launcher = StubLauncher(tmp_path)
+        make_queue(tmp_path, launcher, code_fp=rq.code_compat_key(repo)).run()
+        n_first = len(launcher.launches)
+        self._repo(tmp_path / "repo", 1, extra="z = 3\n")             # code edit, same version
+        make_queue(tmp_path, launcher, code_fp=rq.code_compat_key(repo)).run()
+        assert len(launcher.launches) == n_first                        # nothing reran
+        self._repo(tmp_path / "repo", 2)                                # bump
+        make_queue(tmp_path, launcher, code_fp=rq.code_compat_key(repo)).run()
+        assert len(launcher.launches) > n_first

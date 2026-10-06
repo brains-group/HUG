@@ -49,7 +49,7 @@ CSV_DIR      = ROOT / "data" / "processed" / "kuairand_1k_csv"
 sys.path.insert(0, str(ROOT.parent / "Framework"))
 
 from metrics import compute_metrics  # noqa: E402
-from runtime import environment_versions, is_quiet, set_determinism  # noqa: E402
+from runtime import environment_versions, git_state, is_quiet, set_determinism  # noqa: E402
 from test_guard import authorize_test_access  # noqa: E402
 
 MODELS = {
@@ -220,6 +220,7 @@ def run(args) -> dict:
         "tuned": overrides, "n_params": n_params,
         "checkpoint_mb": round(ckpt.stat().st_size / 1e6, 1) if ckpt.exists() else None,
         "environment": environment_versions(),
+        "git": git_state(),
     }
     done.write_text(json.dumps(out, indent=2, default=float))
     logging.info("Results → %s", run_dir)

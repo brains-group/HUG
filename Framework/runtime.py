@@ -15,6 +15,11 @@ import torch
 
 logger = logging.getLogger(__name__)
 
+# Enters every job's config hash (scripts/run_queue.py) in place of the code
+# itself.  Bump BY HAND only when a change alters the results of existing
+# configurations; additive changes (new flags, new heads) leave it alone.
+CODE_COMPAT_VERSION = 1
+
 
 def set_determinism(seed: int) -> None:
     """
@@ -92,3 +97,21 @@ class Progress:
     def close(self) -> None:
         if self._bar is not None:
             self._bar.close()
+
+
+def git_state(repo_root=None) -> dict[str, str]:
+    """Current commit and a hash of uncommitted changes (recorded, never hashed into configs)."""
+    import hashlib
+    import subprocess
+    from pathlib import Path
+    root = Path(repo_root) if repo_root else Path(__file__).resolve().parents[1]
+    try:
+        commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root, capture_output=True,
+                                text=True, check=True).stdout.strip()
+        diff = subprocess.run(["git", "diff", "--binary", "HEAD", "--", "Framework", "Baselines"],
+                              cwd=root, capture_output=True, check=True).stdout
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return {"commit": "unknown", "dirty_diff_sha256": "unknown"}
+    return {"commit": commit,
+            "dirty_diff_sha256": hashlib.sha256(diff).hexdigest() if diff else "clean",
+            "code_compat_version": str(CODE_COMPAT_VERSION)}

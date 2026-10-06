@@ -15,8 +15,11 @@ Behaviour
 - Dependencies: explicit ``depends_on``, plus the tuning job behind every
   ``{best:<tune_job>}`` placeholder and the stage-1 job named by a final_eval's ``of``.
 - Config hash: sha256 over the job's resolved args (minus GPU/run-dir/logging/token
-  flags), the content of any ``--params`` file, the git tree hashes of ``Framework/`` and
-  ``Baselines/`` (plus their uncommitted changes) and the data fingerprint. A job whose
+  flags), the content of any ``--params`` file, the data fingerprint and
+  ``CODE_COMPAT_VERSION`` (``Framework/runtime.py``, bumped by hand only when a change
+  alters existing configurations' results — spec 05 §0). The git commit and dirty-diff
+  hash of ``Framework/`` and ``Baselines/`` are recorded in each job's ``job.json`` but do
+  not enter the hash, so code landing mid-run does not rerun finished jobs. A job whose
   outputs carry a matching hash is skipped.
 - HUG jobs that left ``last.pt`` behind (with the same hash) are resumed with ``--resume``;
   baseline and tuning jobs are restarted.
@@ -49,6 +52,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import secrets
 import shlex
 import subprocess
@@ -302,6 +306,15 @@ def code_fingerprint(repo_root: Path, dirs: tuple[str, ...] = ("Framework", "Bas
     return _sha256("\n".join(parts))
 
 
+def code_compat_key(repo_root: Path) -> str:
+    """Hash key for code: CODE_COMPAT_VERSION from Framework/runtime.py (read as text)."""
+    text = (repo_root / "Framework" / "runtime.py").read_text()
+    m = re.search(r"^CODE_COMPAT_VERSION\s*=\s*(\d+)", text, re.MULTILINE)
+    if not m:
+        raise SystemExit("CODE_COMPAT_VERSION not found in Framework/runtime.py")
+    return f"compat:{m.group(1)}"
+
+
 def data_fingerprint_from_file(path: Path) -> str:
     """Canonical hash of the data fingerprint JSON (cutoffs plus row counts)."""
     with open(path) as fh:
@@ -396,6 +409,7 @@ class JobQueue:
         code_fp: str,
         data_fp: str,
         *,
+        git_fp: str | None = None,
         repo_root: Path = REPO_ROOT,
         launcher: Launcher = popen_launcher,
         pack: bool = False,
@@ -413,7 +427,8 @@ class JobQueue:
         self.plan = plan
         self.runs_root = Path(runs_root)
         self.gpus = list(gpus)
-        self.code_fp = code_fp
+        self.code_fp = code_fp            # CODE_COMPAT_VERSION key (hashed)
+        self.git_fp = git_fp              # git tree + dirty diff (recorded only)
         self.data_fp = data_fp
         self.repo_root = Path(repo_root)
         self.launcher = launcher
@@ -644,7 +659,8 @@ class JobQueue:
         cmd = self.build_command(job, gpu, job.config_hash, resume=resume, token=token)
         (d / ".launch_hash").write_text(job.config_hash + "\n")
         meta = job.metadata() | {"config_hash": job.config_hash, "dry_run": self.dry_run,
-                                 "command": cmd}
+                                 "command": cmd, "code_compat": self.code_fp,
+                                 "git_code_fingerprint": self.git_fp}
         if job.kind == "final_eval":
             stage1 = self.plan.jobs[job.of]
             meta.update(group=job.group or stage1.group, model=job.model or stage1.model,
@@ -825,10 +841,11 @@ def main(argv: list[str] | None = None) -> int:
         runs_root = dry_run_root(runs_root)
     fp_file = args.fingerprint_file or runs_root / "data_fingerprint.json"
     data_fp = ensure_data_fingerprint(plan, fp_file, REPO_ROOT, args.python)
-    code_fp = code_fingerprint(REPO_ROOT)
+    code_fp = code_compat_key(REPO_ROOT)          # enters the hash
+    git_fp = code_fingerprint(REPO_ROOT)          # recorded only
 
     queue = JobQueue(plan, runs_root, [int(g) for g in args.gpus.split(",") if g.strip()],
-                     code_fp, data_fp, pack=args.pack, max_steps=max_steps,
+                     code_fp, data_fp, git_fp=git_fp, pack=args.pack, max_steps=max_steps,
                      dry_run=args.dry_run, only=args.only,
                      skip_optional=args.skip_optional, python=args.python,
                      poll_seconds=args.poll_seconds)
