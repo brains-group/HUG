@@ -21,7 +21,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 
-NODE_TYPES = ("user", "video", "author", "category")
+# Node types: "user", "video" (the item type of any dataset) and the dataset's
+# metadata types (ID embeddings), declared by its GraphSpec.
 
 
 def _emb(n: int, d: int, std: float = 0.1) -> nn.Embedding:
@@ -37,8 +38,7 @@ class InputEncoder(nn.Module):
     h0 for every node:
         user     : user_id_emb[vocab] + Linear(cont features ‖ onehot embeddings)
         video    : video_id_emb[vocab] + Linear(snapshot video features) + Σ cat_emb
-        author   : ID embedding
-        category : ID embedding
+        metadata : ID embedding per metadata node type (e.g. author, category)
 
     Vocabulary row 0 is the shared OOV row.  Node → vocabulary maps and static
     node features are buffers set by `set_node_data` (not saved in checkpoints;
@@ -54,8 +54,7 @@ class InputEncoder(nn.Module):
         n_video_vocab:     int,
         video_feat_dim:    int,
         cat_vocab_sizes:   list[int],
-        n_authors:         int,
-        n_categories:      int,
+        meta_counts:       dict[str, int],
     ) -> None:
         super().__init__()
         self.d = d
@@ -65,8 +64,12 @@ class InputEncoder(nn.Module):
         self.video_id   = _emb(n_video_vocab, d)
         self.video_proj = nn.Linear(video_feat_dim, d)
         self.cat        = nn.ModuleList([_emb(v, d) for v in cat_vocab_sizes])
-        self.author   = _emb(n_authors, d)
-        self.category = _emb(n_categories, d)
+        # one ID table per metadata type, registered under the type's name (in order)
+        self.meta_types = list(meta_counts)
+        for t, n in meta_counts.items():
+            if t in ("user", "video") or hasattr(self, t):
+                raise ValueError(f"metadata node type {t!r} clashes with an InputEncoder attribute")
+            setattr(self, t, _emb(n, d))
 
     def set_node_data(self, user_vocab: Tensor, user_x: Tensor, user_onehot: Tensor,
                       video_vocab: Tensor, video_cat: Tensor) -> None:
@@ -91,7 +94,7 @@ class InputEncoder(nn.Module):
 
     def tables(self, video_x: Tensor) -> dict[str, Tensor]:
         return {"user": self.users(), "video": self.videos(video_x),
-                "author": self.author.weight, "category": self.category.weight}
+                **{t: getattr(self, t).weight for t in self.meta_types}}
 
     def l2_touched(self, user_idx: Tensor, video_idx: Tensor) -> Tensor:
         """Squared norm of the ID-embedding rows a batch touches (users, videos incl. history)."""

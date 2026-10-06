@@ -29,37 +29,28 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from data_loader import SPLIT_TEST, SPLIT_TRAIN, SPLIT_VAL, KuaiRandData, KuaiRandLoader
-from features import (
-    HUG_VIDEO_CAT_COLS, METADATA_NEIGHBOURS, asof_video_statistics, bucket_keys, click_history,
-    holdout_rows, hour_of_day, video_categoricals, view_evidence,
-)
-from hkg_constructor import HKG_BUILD_VERSION, HKGBundle, HKGConstructor
+from data_loader import SPLIT_TEST, SPLIT_TRAIN, SPLIT_VAL, KuaiRandData
+from datasets import DatasetBundle, GraphSpec, load_dataset
+from features import bucket_keys, click_history, holdout_rows, view_evidence
+from hkg_constructor import HKG_BUILD_VERSION, HKGBundle
 from hug import HistoryTransformer, HUGModel, InputEncoder, RelLightGCN
 from metrics import Metrics, compute_metrics
 from runtime import Progress, git_state, is_quiet, log_versions, set_determinism
-from temporal import (
-    Interactions, SnapshotStore, assign_snapshots, build_interactions, snapshot_boundaries,
-)
+from temporal import Interactions, SnapshotStore, assign_snapshots, snapshot_boundaries
 from test_guard import authorize_test_access
 
 logger = logging.getLogger(__name__)
 
 
-# ── Relations: the 14 structural ones (spec 01) + next_in_session ─────────────
+# Pre-window history tokens (MIND) carry this gap bucket; real gaps never reach it
+PRE_WINDOW_GAP = HistoryTransformer.N_GAP_BUCKETS - 1
+
 
 def hug_relations():
-    """(forward_ids, reverse_ids, [(src_type, dst_type)] by relation id)."""
-    from main import REL_MAP, REVERSE_REL_MAP
-    seq_et = ("video", "next_in_session", "video")
-    forward = dict(REL_MAP)
-    forward[seq_et] = 2 * len(REL_MAP)                    # one-directional
-    types = [None] * (2 * len(REL_MAP) + 1)
-    for et, rid in forward.items():
-        types[rid] = (et[0], et[2])
-    for et, rid in REVERSE_REL_MAP.items():
-        types[rid] = (et[2], et[0])
-    return forward, REVERSE_REL_MAP, types
+    """KuaiRand's HUG relation set (kept for callers of the pre-adapter API)."""
+    from datasets.kuairand import hug_relations as rel
+    fwd, rev, types, _ = rel()
+    return fwd, rev, types
 
 
 def arm_name(args) -> str:
@@ -91,7 +82,7 @@ class HugData:
     holdout:    np.ndarray
     val_rows:   np.ndarray
     test_rows:  np.ndarray
-    hist_seq:   np.ndarray              # history token rows (row ids), see click_history
+    hist_seq:   np.ndarray              # history token ids (row ids, then pre-window tokens)
     hist_start: np.ndarray
     hist_end:   np.ndarray
     session:    np.ndarray              # [N]
@@ -99,12 +90,18 @@ class HugData:
     ctx_num:    np.ndarray              # [N, K] float32
     buckets:    dict
     store:      SnapshotStore | None
-    bundle:     HKGBundle
+    graph:      GraphSpec
     node_data:  dict                    # tensors for InputEncoder.set_node_data
     vocab:      dict                    # sizes and OOV shares
     fingerprint: dict
     video_cat_raw: object = None        # shared categorical strings per video (node order)
     evidence:   np.ndarray | None = None  # [N, 2] causal per-view evidence (n_G, n_S)
+    # history token table: token id → item, time, session, pre-window flag
+    tok_item:   np.ndarray | None = None
+    tok_time:   np.ndarray | None = None
+    tok_sess:   np.ndarray | None = None
+    tok_pre:    np.ndarray | None = None
+    dataset:    str = "kuairand"
 
 
 def _vocab(counts: np.ndarray, m: int) -> np.ndarray:
@@ -116,19 +113,16 @@ def _vocab(counts: np.ndarray, m: int) -> np.ndarray:
 
 
 def data_fingerprint(inter: Interactions) -> dict:
-    return {
-        "t_val": int(inter.t_val), "t_test": int(inter.t_test),
-        "rows": {name: int((inter.split == code).sum())
-                 for name, code in (("train", SPLIT_TRAIN), ("val", SPLIT_VAL), ("test", SPLIT_TEST))},
-        "n_users": int(inter.user.max()) + 1,
-    }
+    from datasets.base import data_fingerprint as fp
+    return fp(inter)
 
 
-def prepare(args, data: KuaiRandData | None = None, bundle: HKGBundle | None = None) -> HugData:
-    if data is None:
-        data = KuaiRandLoader(args.data_dir, min_interactions=args.min_interactions,
-                              filter_ads=True).load()
-    inter = build_interactions(data, args.val_ratio, args.test_ratio, max_prefix=args.max_seq_len)
+def prepare(args, data: KuaiRandData | None = None, bundle: HKGBundle | None = None,
+            ds: DatasetBundle | None = None) -> HugData:
+    """HugData from a dataset adapter (spec 06).  `data`/`bundle` preload KuaiRand."""
+    if ds is None:
+        ds = load_dataset(args, data=data, hkg=bundle)
+    inter = ds.inter
     N, t_val = len(inter.time), inter.t_val
 
     boundaries = snapshot_boundaries(inter.time, t_val, inter.t_test, args.snapshot_hours)
@@ -141,78 +135,70 @@ def prepare(args, data: KuaiRandData | None = None, bundle: HKGBundle | None = N
     if warmup > 0:
         train_rows = train_rows[inter.time[train_rows] >= inter.time.min() + int(warmup * 3_600_000)]
 
-    # History: last max_seq_len clicks strictly before each row (shared with the baselines)
+    # History: last max_len known clicks (label_time < t) plus any pre-window clicks,
+    # shared with the baselines.  Token ids: rows 0..N-1, then pre-window tokens.
+    session = np.asarray(ds.session, np.int64)
+    pw_item = np.zeros(0, np.int64)
+    pre = None
+    if ds.pre_window is not None and len(ds.pre_window[0]):
+        pw_user, pw_item = (np.asarray(a, np.int64) for a in ds.pre_window)
+        pre = (pw_user, N + np.arange(len(pw_user)))
     hist_seq, hs, he = click_history(inter.user, inter.time, np.arange(N), inter.label,
-                                     args.max_seq_len)
-    frame   = inter.frame
-    session = frame["session_id"].to_numpy(np.int64)
+                                     args.max_seq_len, label_time=ds.label_time, pre_window=pre)
+    n_pre = len(pw_item)
+    tok_item = np.r_[inter.video, pw_item]
+    tok_time = np.r_[inter.time, np.zeros(n_pre, np.int64)]
+    tok_sess = np.r_[session, np.full(n_pre, -1, np.int64)]
+    tok_pre  = np.r_[np.zeros(N, bool), np.ones(n_pre, bool)]
 
-    # Context: tab, hour, per-row as-of video statistics
-    tab  = frame["tab"].fillna(0).to_numpy(np.int64)
-    hour = hour_of_day(inter.time)
-    ctx_cat = np.stack([tab, hour], axis=1)
-    ctx_num = asof_video_statistics(frame)
-    # Per-view evidence for fusion heads (spec 05): strictly earlier counts only
-    item_meta = data.video_basic[["video_id"] + METADATA_NEIGHBOURS]
-    # n_S's history term is the length of the encoder's own history (hist_seq[hs:he])
-    evidence = view_evidence(frame, item_meta, he - hs)
+    ctx_cat, ctx_num = ds.ctx_cat, ds.ctx_num
+    # Per-view evidence for fusion heads (spec 05); n_S's history term is the length of
+    # the encoder's own history (hist_seq[hs:he])
+    evidence = view_evidence(inter.video, inter.time, he - hs, ds.metadata_links)
 
-    # Vocabularies from the training window only (time < t_val)
+    # Vocabularies from the training window only (time < t_val; pre-window clicks precede it)
     tw = inter.time < t_val
-    n_users  = len(data.user_id_map)
-    n_videos = len(data.video_id_map)
+    n_users, n_videos = ds.n_users, ds.n_items
     user_cnt  = np.bincount(inter.user[tw],  minlength=n_users)
     video_cnt = np.bincount(inter.video[tw], minlength=n_videos)
+    if n_pre:
+        video_cnt = video_cnt + np.bincount(pw_item, minlength=n_videos)
     user_vocab  = _vocab(user_cnt,  args.min_id_count)
     video_vocab = _vocab(video_cnt, args.min_id_count)
 
-    vc = video_categoricals(data.video_basic)
-    vc = vc[vc["video_id"].isin(data.video_id_map)]
-    vc = vc.assign(node=vc["video_id"].map(data.video_id_map)).sort_values("node")
+    vc = ds.item_cat
+    nodes = vc["node"].to_numpy() if "node" in vc else np.arange(len(vc))
     cat_idx, cat_sizes = [], []
-    for col in HUG_VIDEO_CAT_COLS:
+    for col in ds.item_cat_cols:
         codes, uniq = pd_factorize(vc[col].to_numpy())
-        code_cnt = np.bincount(codes, weights=video_cnt[vc["node"].to_numpy()], minlength=len(uniq))
+        code_cnt = np.bincount(codes, weights=video_cnt[nodes], minlength=len(uniq))
         voc = _vocab(code_cnt, args.min_id_count)
         cat_idx.append(voc[codes])
         cat_sizes.append(int(voc.max()) + 1)
-    video_cat = np.stack(cat_idx, axis=1)
+    video_cat = (np.stack(cat_idx, axis=1) if cat_idx
+                 else np.zeros((n_videos, 0), np.int64))
 
     vocab = {
         "users": int(user_vocab.max()), "videos": int(video_vocab.max()),
-        "categoricals": dict(zip(HUG_VIDEO_CAT_COLS, [s - 1 for s in cat_sizes])),
+        "categoricals": dict(zip(ds.item_cat_cols, [s - 1 for s in cat_sizes])),
         "oov_share_train_rows": float((video_vocab[inter.video[train_rows]] == 0).mean()),
         "oov_share_val_rows":   float((video_vocab[inter.video[inter.rows(SPLIT_VAL)]] == 0).mean()),
     }
     logger.info("Vocabulary (min_id_count=%d): %s", args.min_id_count, vocab)
 
-    # Graph: timed HKG + master relation index over the HUG relations
-    if bundle is None:
-        from main import load_hkg, resolve_cache_dir, save_hkg
-        cache_dir = resolve_cache_dir(args)
-        bundle = load_hkg(cache_dir, data) if cache_dir else None
-        if bundle is None:
-            bundle = HKGConstructor(data, device="cpu").build()
-            if cache_dir:
-                save_hkg(bundle, cache_dir)
-    store = None
+    # Graph: master relation index (timed) + per-snapshot item features
     real_test = args.eval_test and not args.max_steps
     rows_used = np.r_[train_rows, holdout, inter.rows(SPLIT_VAL),
                       inter.rows(SPLIT_TEST) if real_test else np.zeros(0, np.int64)]
     needed = set(np.unique(snap[rows_used]).tolist())
-    if not args.no_graph:
-        from main import _merged_edge_index
-        fwd, rev, _ = hug_relations()
-        master = _merged_edge_index(bundle.full_graph, fwd, rev)
-        logger.info("HUG master relation index: %s edges", f"{master[0].shape[1]:,}")
-        store = SnapshotStore(bundle, data, boundaries, master, needed=needed)
-    else:
-        store = SnapshotStore(bundle, data, boundaries, None, needed=needed)
+    master = None if args.no_graph else ds.graph.master()
+    store = SnapshotStore(None, None, boundaries, master, needed=needed,
+                          item_features=ds.item_features)
 
-    ug = bundle.full_graph["user"]
     node_data = {
         "user_vocab": torch.from_numpy(user_vocab),
-        "user_x": ug.x.float().cpu(), "user_onehot": ug.onehot.long().cpu(),
+        "user_x": torch.from_numpy(np.asarray(ds.user_x, np.float32)),
+        "user_onehot": torch.from_numpy(np.asarray(ds.user_onehot, np.int64)),
         "video_vocab": torch.from_numpy(video_vocab),
         "video_cat": torch.from_numpy(video_cat),
         "cat_sizes": cat_sizes,
@@ -224,10 +210,12 @@ def prepare(args, data: KuaiRandData | None = None, bundle: HKGBundle | None = N
         hist_seq=hist_seq, hist_start=hs, hist_end=he, session=session,
         ctx_cat=ctx_cat, ctx_num=ctx_num,
         buckets=bucket_keys(inter.video, inter.time, he - hs, t_val, boundaries[snap], args.max_seq_len),
-        store=store, bundle=bundle, node_data=node_data, vocab=vocab,
-        fingerprint=data_fingerprint(inter),
+        store=store, graph=ds.graph, node_data=node_data, vocab=vocab,
+        fingerprint=ds.fingerprint,
         video_cat_raw=vc.reset_index(drop=True),
         evidence=evidence,
+        tok_item=tok_item, tok_time=tok_time, tok_sess=tok_sess, tok_pre=tok_pre,
+        dataset=ds.name,
     )
 
 
@@ -246,6 +234,12 @@ class HugBatcher:
         self.time  = torch.from_numpy(it.time)
         self.label = torch.from_numpy(it.label)
         self.sess  = torch.from_numpy(d.session)
+        # history tokens: rows, then pre-window clicks
+        self.tok_item = torch.from_numpy(d.tok_item if d.tok_item is not None else it.video)
+        self.tok_time = torch.from_numpy(d.tok_time if d.tok_time is not None else it.time)
+        self.tok_sess = torch.from_numpy(d.tok_sess if d.tok_sess is not None else d.session)
+        self.tok_pre  = torch.from_numpy(d.tok_pre if d.tok_pre is not None
+                                         else np.zeros(len(it.time), bool))
         self.hs, self.he = torch.from_numpy(d.hist_start), torch.from_numpy(d.hist_end)
         self.hrow  = torch.from_numpy(d.hist_seq)
         self.ctx_cat = torch.from_numpy(d.ctx_cat)
@@ -258,10 +252,12 @@ class HugBatcher:
         r   = torch.from_numpy(np.asarray(rows, dtype=np.int64))
         pos = self.he[r, None] + self.offsets
         ok  = pos >= self.hs[r, None]
-        hr  = self.hrow[pos.clamp(min=0)]                         # history token row ids
-        hist = torch.where(ok, self.video[hr], torch.full_like(hr, -1))
-        gap  = HistoryTransformer.gap_bucket(self.time[r, None] - self.time[hr])
-        same = (self.sess[hr] == self.sess[r, None]).long()
+        hr  = self.hrow[pos.clamp(min=0)]                         # history token ids
+        hist = torch.where(ok, self.tok_item[hr], torch.full_like(hr, -1))
+        pre  = self.tok_pre[hr]
+        gap  = HistoryTransformer.gap_bucket(self.time[r, None] - self.tok_time[hr])
+        gap  = torch.where(pre, torch.full_like(gap, PRE_WINDOW_GAP), gap)
+        same = ((self.tok_sess[hr] == self.sess[r, None]) & ~pre).long()
         return {
             "row": r, "user": self.user[r], "video": self.video[r], "label": self.label[r],
             "hist": hist, "hist_rank": self.rank.expand_as(hist),
@@ -281,14 +277,14 @@ def build(args, d: HugData) -> HUGModel:
     inp = InputEncoder(
         args.emb_dim, int(nd["user_vocab"].max()) + 1, nd["user_x"].shape[1], onehot_vocab,
         int(nd["video_vocab"].max()) + 1, video_feat_dim, nd["cat_sizes"],
-        d.bundle.n_authors, d.bundle.n_categories,
+        {t: d.graph.counts[t] for t in d.graph.node_types[2:]},
     )
     inp.set_node_data(nd["user_vocab"], nd["user_x"], nd["user_onehot"],
                       nd["video_vocab"], nd["video_cat"])
     gcn = None
     if not args.no_graph:
-        _, _, types = hug_relations()
-        gcn = RelLightGCN(types, args.graph_layers, eps=args.cl_eps, cl_layer=args.cl_layer)
+        gcn = RelLightGCN(d.graph.relations, args.graph_layers, eps=args.cl_eps,
+                          cl_layer=args.cl_layer)
     seq = None if args.no_seq else HistoryTransformer(args.emb_dim, args.seq_layers,
                                                       args.max_seq_len, dropout=args.dropout)
     ctx_vocab = [int(d.ctx_cat[:, i].max()) + 1 for i in range(d.ctx_cat.shape[1])]
@@ -316,11 +312,8 @@ class Snapshots:
 
     def __init__(self, d: HugData, model: HUGModel, device: torch.device) -> None:
         self.d, self.model, self.device = d, model, device
-        b = d.bundle
-        self.offsets = {"user": 0, "video": b.n_users, "author": b.n_users + b.n_videos,
-                        "category": b.n_users + b.n_videos + b.n_authors}
-        self.counts = {"user": b.n_users, "video": b.n_videos,
-                       "author": b.n_authors, "category": b.n_categories}
+        self.offsets = d.graph.offsets
+        self.counts = dict(d.graph.counts)
         self.current = None
         self.video_x = None
 

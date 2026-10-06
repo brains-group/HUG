@@ -492,9 +492,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
 
     # Data & paths
-    p.add_argument("--data-dir",   type=str,
-                   default=str(Path(__file__).resolve().parents[1] / "KuaiRand-1K" / "data"),
-                   help="Path to KuaiRand data directory (six CSV files)")
+    p.add_argument("--dataset",    type=str, default="kuairand",
+                   choices=["kuairand", "mind", "zhihurec"], help="dataset adapter (spec 06)")
+    p.add_argument("--data-dir",   type=str, default=None,
+                   help="Dataset directory. Default per dataset: KuaiRand-1K/data, "
+                        "MIND/extracted, ZhihuRec/raw")
+    p.add_argument("--user-frac",  type=float, default=None,
+                   help="Random user sample (seed 0) applied before anything else. "
+                        "Default per dataset: kuairand 1.0, mind 0.2, zhihurec 0.125")
+    p.add_argument("--skip-edges", action=argparse.BooleanOptionalAction, default=True,
+                   help="MIND/ZhihuRec: user–skipped→item edges (impressed, not clicked)")
+    p.add_argument("--entity-init", choices=["id", "transe"], default="id",
+                   help="MIND entity nodes: ID embeddings, or + a projection of the frozen "
+                        "TransE vectors")
+    p.add_argument("--label-delay-s", type=int, default=900,
+                   help="ZhihuRec: a non-click's label is known this long after the impression")
+    p.add_argument("--snapshot-features", action="store_true",
+                   help="ZhihuRec sensitivity run only: add the untimed snapshot counters "
+                        "(leak post-window information; never in the main protocol)")
     p.add_argument("--cache-dir",  type=str, default=None,
                    help="Directory for HKG cache and model checkpoint. "
                         "Defaults to ./cache/<scale>. Set to 'none' to disable.")
@@ -632,6 +647,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         overrides = yaml.safe_load(Path(pre.params).read_text()) or {}
         p.set_defaults(**{k.replace("-", "_"): v for k, v in overrides.items()})
     args = p.parse_args(argv)
+    if args.data_dir is None:
+        root = Path(__file__).resolve().parents[1]
+        args.data_dir = str({"kuairand": root / "KuaiRand-1K" / "data", "mind": root / "MIND" / "extracted",
+                             "zhihurec": root / "ZhihuRec" / "raw"}[args.dataset])
+    if args.user_frac is None:
+        args.user_frac = {"kuairand": 1.0, "mind": 0.2, "zhihurec": 0.125}[args.dataset]
     if args.batch_size is None:
         args.batch_size = 8192 if args.model_type == "hug" else 2048
     return args

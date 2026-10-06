@@ -63,6 +63,8 @@ class Interactions:
     # Raw columns in the same row order (row id = position): ids, time, tab,
     # session and feedback flags — input to features.py
     frame:     pd.DataFrame | None = None
+    # Earliest time each row's label is known (spec 06 B); None = time
+    label_time: np.ndarray | None = None
 
     def rows(self, split: int) -> np.ndarray:
         return np.flatnonzero(self.split == split)
@@ -155,6 +157,7 @@ class SnapshotStore:
         rel_master:  tuple[Tensor, Tensor, Tensor] | None,
         needed:      set[int] | None = None,
         drop_edges:  bool = False,
+        item_features=None,
     ) -> None:
         self.bundle     = bundle
         self.boundaries = boundaries
@@ -167,17 +170,12 @@ class SnapshotStore:
         self.rel_master = rel_master
         self._rel_dev: dict[torch.device, tuple[Tensor, Tensor, Tensor]] = {}
 
-        vb = data.video_basic[data.video_basic["video_id"].isin(data.video_id_map)].copy()
-        vb["node_idx"] = vb["video_id"].map(data.video_id_map)
-        vb = vb.sort_values("node_idx")
-
-        log  = data.log_combined[["video_id", "time_ms", "long_view", "is_click",
-                                  "is_like", "is_follow", "is_forward", "is_comment"]]
+        if item_features is None:                 # legacy KuaiRand callers
+            from datasets.kuairand import KuaiRandItemFeatures
+            item_features = KuaiRandItemFeatures(data)
         keys = sorted(needed) if needed is not None else range(len(boundaries))
         for k in keys:
-            cutoff = int(boundaries[k])
-            stats  = compute_video_statistics(log[log["time_ms"] < cutoff])
-            self.video_x[k] = torch.from_numpy(video_feature_matrix(vb, stats))
+            self.video_x[k] = torch.from_numpy(item_features.at(int(boundaries[k])))
         logger.info("Prepared %d graph snapshots", len(self.video_x))
 
     def rel(self, k: int, device: torch.device | str = "cpu") -> tuple[Tensor, Tensor]:

@@ -13,6 +13,8 @@ from tests import (  # noqa: F401  (fixtures)
 from hkg_constructor import HKGConstructor
 
 N4_PRE_SPEC05_FINGERPRINT = "60d53e57ca7db1c58674a9bb02cc3d4474fb25f1d3edc0c57ff32a934c33c4ea"
+# KuaiRand data pipeline before the spec 06 adapter refactor (regression_fingerprint.py)
+KUAIRAND_PRE_SPEC06_DATA_FINGERPRINT = "f54615d07436e3efcfc6c7bd04e69d59063592fb0c7ee9c471185d64532c35b1"
 
 
 def _sparse(**kw):
@@ -62,9 +64,11 @@ def test_evidence_causal_with_ties():
     meta = pd.DataFrame({"video_id": range(8), "author_id": [0, 0, 1, 1, 2, 2, np.nan, np.nan]})
     user = rng.integers(0, 4, n)
     click = rng.integers(0, 2, n)
+    has = meta.author_id.notna()
+    links = [(meta.video_id[has].to_numpy(), meta.author_id[has].to_numpy().astype(int))]
     for max_len in (1_000, 3):                      # untruncated and truncated histories
         _, hs, he = click_history(user, fr.time_ms.to_numpy(), np.arange(n), click, max_len)
-        ev = view_evidence(fr, meta, he - hs)
+        ev = view_evidence(fr.video_id.to_numpy(), fr.time_ms.to_numpy(), he - hs, links)
         auth = fr.video_id.map(dict(zip(meta.video_id, meta.author_id))).to_numpy()
         tt = fr.time_ms.to_numpy()
         for i in range(n):
@@ -78,18 +82,31 @@ def test_evidence_causal_with_ties():
 
 def test_missing_metadata_neighbour_contributes_zero():
     from features import metadata_evidence
-    fr = pd.DataFrame({"video_id": [0, 1, 2, 3, 0], "time_ms": [0, 1, 2, 3, 4]})
-    meta = pd.DataFrame({"video_id": [0, 1, 2, 3], "author_id": [5, np.nan, np.nan, np.nan]})
-    me = metadata_evidence(fr, meta)
+    item, t = np.array([0, 1, 2, 3, 0]), np.array([0, 1, 2, 3, 4])
+    # only item 0 has an author; items 1-3 have none and must not be pooled
+    me = metadata_evidence(item, t, [(np.array([0]), np.array([5]))])
     np.testing.assert_allclose(me, np.log1p([0, 0, 0, 0, 1]))
+
+
+def test_metadata_evidence_multiple_neighbours():
+    """MIND-style: an item links several entities; the row takes the max as-of count."""
+    from features import metadata_evidence
+    item = np.array([0, 1, 2, 0, 2, 1])
+    t = np.array([0, 1, 1, 2, 3, 3])
+    links = [(np.array([0, 0, 1, 2]), np.array([7, 8, 8, 9]))]   # 0→{7,8}, 1→{8}, 2→{9}
+    me = metadata_evidence(item, t, links)
+    # brute force: per row, max over its neighbours of earlier rows linking that neighbour
+    nbs = {0: [7, 8], 1: [8], 2: [9]}
+    want = [max(sum(1 for j in range(6) if t[j] < t[i] and nb in nbs[item[j]]) for nb in nbs[item[i]])
+            for i in range(6)]
+    np.testing.assert_allclose(me, np.log1p(want))
 
 
 def test_sequence_evidence_uses_encoder_history(hug_data):
     """n_S's history term is log1p of the encoder's history length (hist_end − hist_start)."""
     from features import asof_group_count
     d = hug_data
-    fr = d.inter.frame
-    item_prior = np.log1p(asof_group_count(pd.factorize(fr["video_id"])[0], fr["time_ms"].to_numpy()))
+    item_prior = np.log1p(asof_group_count(d.inter.video, d.inter.time))
     np.testing.assert_allclose(d.evidence[:, 1],
                                np.log1p(d.hist_end - d.hist_start) + item_prior, atol=1e-5)
 
@@ -247,6 +264,12 @@ def test_dead_atom_resampling():
 def test_concat_bitwise_matches_pre_spec05():
     from regression_fingerprint import fingerprint
     assert fingerprint() == N4_PRE_SPEC05_FINGERPRINT
+
+
+def test_kuairand_adapter_data_bitwise_matches_pre_spec06():
+    """Spec 06 A1: split, histories, features, snapshot edges/features, baseline frame."""
+    from regression_fingerprint import data_fingerprint_hash
+    assert data_fingerprint_hash() == KUAIRAND_PRE_SPEC06_DATA_FINGERPRINT
 
 
 # 8 ─────────────────────────────────────────────────────────────────────────────

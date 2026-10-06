@@ -89,3 +89,60 @@ def fingerprint() -> str:
 
 if __name__ == "__main__":
     print(fingerprint())
+
+
+def data_fingerprint_hash() -> str:
+    """
+    sha256 over every KuaiRand data-pipeline output on the synthetic dataset (spec 06 A1):
+    split, histories, context, evidence, buckets, vocabularies and node data, the snapshot
+    relation index and per-snapshot video features, and the baseline CSV frame.
+    """
+    import hug_train
+    import main as pipeline
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "Baselines"))
+    import preprocess
+    with tempfile.TemporaryDirectory() as tmp:
+        data_dir = synthetic_dir(Path(tmp) / "data")
+        uf = pd.read_csv(data_dir / "user_features_1k.csv")       # baseline categoricals
+        for c in ("follow_user_num_range", "fans_user_num_range", "friend_user_num_range",
+                  "register_days_range"):
+            uf[c] = (uf.index % 3).astype(str)
+        uf.to_csv(data_dir / "user_features_1k.csv", index=False)
+        args = pipeline.parse_args([
+            "--data-dir", str(data_dir), "--cache-dir", "none", "--device", "cpu", "--quiet",
+            "--min-interactions", "1", "--emb-dim", "8", "--min-id-count", "2",
+            "--snapshot-hours", "4", "--max-seq-len", "5"])
+        d = hug_train.prepare(args)
+        h = hashlib.sha256()
+
+        def put(x):
+            h.update(np.ascontiguousarray(np.asarray(x)).tobytes())
+
+        it = d.inter
+        for a in (it.user, it.video, it.time, it.label, it.split, d.snap, d.boundaries,
+                  d.train_rows, d.holdout, d.val_rows, d.test_rows, d.session,
+                  d.ctx_cat, d.ctx_num, d.evidence):
+            put(a)
+        # histories as the batcher sees them (item, time and session of each token)
+        for r in range(len(it.time)):
+            toks = d.hist_seq[d.hist_start[r]:d.hist_end[r]]
+            put(it.video[toks]); put(it.time[toks]); put(d.session[toks])
+        for k in sorted(d.buckets):
+            put(d.buckets[k].astype("U16"))
+        for k, v in d.node_data.items():
+            put(v.numpy() if hasattr(v, "numpy") else v)
+        for t in d.store.rel_master:
+            put(t.numpy())
+        for k in sorted(d.store.video_x):
+            put(d.store.video_x[k].numpy())
+        b = hug_train.HugBatcher(d, args.max_seq_len)(np.arange(len(it.time)))
+        for k in sorted(b):
+            put(b[k].numpy())
+        # baseline CSV frame
+        from data_loader import KuaiRandLoader
+        from temporal import build_interactions
+        data = KuaiRandLoader(str(data_dir), min_interactions=1, filter_ads=True).load()
+        inter = build_interactions(data, 0.1, 0.2, max_prefix=preprocess.MAX_SEQ_LEN)
+        bf = preprocess.baseline_frame(data, inter)[preprocess.COLUMNS + ["split"]]
+        h.update(bf.to_csv(index=False).encode())
+        return h.hexdigest()
