@@ -33,7 +33,9 @@ from data_loader import (
     SPLIT_TEST, SPLIT_TRAIN, SPLIT_VAL,
     KuaiRandData, assign_split, chronological_cutoffs, compute_video_statistics,
 )
-from hkg_constructor import HKGBundle, snapshot_bundle, video_feature_matrix
+from hkg_constructor import (
+    VIDEO_FEATURE_COLS, HKGBundle, snapshot_bundle, video_feature_matrix,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -147,9 +149,12 @@ class SnapshotStore:
         boundaries:  np.ndarray,
         rel_builder: Callable[[HKGBundle], tuple[Tensor, Tensor]],
         needed:      set[int] | None = None,
+        drop_edges:  bool = False,
     ) -> None:
         self.bundle     = bundle
         self.boundaries = boundaries
+        self.drop_edges = drop_edges        # features-only control: views carry no edges
+        self.encode_log: list[dict] = []
         self.video_x:   dict[int, Tensor] = {}
         self.rel:       dict[int, tuple[Tensor, Tensor]] = {}
 
@@ -169,7 +174,19 @@ class SnapshotStore:
 
     def view(self, k: int) -> HKGBundle:
         """Bundle restricted to behaviour before boundaries[k]."""
-        return snapshot_bundle(self.bundle, int(self.boundaries[k]), self.video_x.get(k))
+        v = snapshot_bundle(self.bundle, int(self.boundaries[k]), self.video_x.get(k))
+        if self.drop_edges:
+            for g in (v.full_graph, v.structural_graph, v.sequential_graph):
+                for et in g.edge_types:
+                    g[et].edge_index = g[et].edge_index[:, :0]
+        return v
+
+    _SHOW_COL = VIDEO_FEATURE_COLS.index("show_cnt_log")
+    _COLD_MAX = float(np.log1p(1.0))                 # show_cnt <= 1
+
+    def is_cold(self, k: int, video_idx: Tensor) -> np.ndarray:
+        """True where the video had 0–1 interactions before snapshot k."""
+        return (self.video_x[k][video_idx, self._SHOW_COL] <= self._COLD_MAX + 1e-6).numpy()
 
 
 # ── Batching ──────────────────────────────────────────────────────────────────

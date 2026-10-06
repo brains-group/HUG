@@ -175,6 +175,10 @@ class Metrics:
     ndcg10:    float = 0.0
     n_samples: int   = 0
     n_pos:     int   = 0
+    # Candidate video with 0–1 (cold) vs >=2 (warm) earlier interactions in its snapshot
+    auc_cold:  float = float("nan")
+    auc_warm:  float = float("nan")
+    n_cold:    int   = 0
 
     def __str__(self) -> str:
         pos_rate = self.n_pos / max(self.n_samples, 1)
@@ -182,7 +186,8 @@ class Metrics:
             f"[{self.split:5s}]  loss={self.loss:.4f}  "
             f"AUC={self.auc:.4f}  AP={self.ap:.4f}  "
             f"LogLoss={self.logloss:.4f}  nDCG@10={self.ndcg10:.4f}  "
-            f"n={self.n_samples:,}  pos_rate={pos_rate:.3f}"
+            f"n={self.n_samples:,}  pos_rate={pos_rate:.3f}  "
+            f"AUC cold/warm={self.auc_cold:.4f}/{self.auc_warm:.4f} (n_cold={self.n_cold:,})"
         )
 
 
@@ -222,7 +227,8 @@ def _per_user_ndcg_at_k(
 
 def compute_metrics(split: str, labels: np.ndarray,
                     probas: np.ndarray, loss: float,
-                    user_idxs: np.ndarray | None = None) -> Metrics:
+                    user_idxs: np.ndarray | None = None,
+                    cold: np.ndarray | None = None) -> Metrics:
     m = Metrics(split=split, loss=loss,
                 n_samples=len(labels), n_pos=int(labels.sum()))
     if m.n_pos == 0 or m.n_pos == m.n_samples:
@@ -233,6 +239,11 @@ def compute_metrics(split: str, labels: np.ndarray,
     m.logloss = float(log_loss(labels, probas))
     if user_idxs is not None:
         m.ndcg10 = _per_user_ndcg_at_k(user_idxs, labels, probas, k=10)
+    if cold is not None:
+        m.n_cold = int(cold.sum())
+        for mask, attr in ((cold, "auc_cold"), (~cold, "auc_warm")):
+            if 0 < labels[mask].sum() < mask.sum():
+                setattr(m, attr, float(roc_auc_score(labels[mask], probas[mask])))
     return m
 
 
@@ -453,14 +464,29 @@ def encode_snapshot(model, store: SnapshotStore, k: int, model_type: str) -> dic
 
     was_training = model.training
     model.eval()
+    t0 = time.time()
+    if enc_dev.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(enc_dev)
     if model_type == "single":
         emb = model.encode_graph(view.full_graph, rel_ei.to(enc_dev), rel_t.to(enc_dev))
     else:
         emb = model.encode_graph(view.structural_graph, view.sequential_graph,
                                  rel_ei.to(enc_dev), rel_t.to(enc_dev))
     model.train(was_training)
+    peak_gb = torch.cuda.max_memory_allocated(enc_dev) / 1e9 if enc_dev.type == "cuda" else 0.0
+    store.encode_log.append({"snapshot": int(k), "seconds": round(time.time() - t0, 3),
+                             "peak_gpu_gb": round(peak_gb, 3)})
     head_dev = model.head_device
     return {k_: v.to(head_dev) for k_, v in emb.items()}
+
+
+def _encode_summary(log: list[dict]) -> dict:
+    if not log:
+        return {}
+    secs = [e["seconds"] for e in log]
+    return {"n_encodes": len(log), "mean_seconds": round(float(np.mean(secs)), 3),
+            "max_seconds": round(float(np.max(secs)), 3),
+            "max_peak_gpu_gb": round(max(e["peak_gpu_gb"] for e in log), 3)}
 
 
 def run_split(
@@ -489,7 +515,7 @@ def run_split(
     if is_train:
         snaps = np.random.permutation(snaps)
 
-    total_loss, all_labels, all_probas, all_users = 0.0, [], [], []
+    total_loss, all_labels, all_probas, all_users, all_cold = 0.0, [], [], [], []
     pbar = tqdm(total=len(rows), desc=f"  {split:5s}", unit="row",
                 dynamic_ncols=True, leave=False)
 
@@ -504,6 +530,7 @@ def run_split(
         with ctx:
             for b0 in range(0, len(sel), batch_size):
                 batch = batcher(sel[b0:b0 + batch_size])
+                all_cold.append(store.is_cold(int(k), batch["video_idx"]))
                 batch = {key: v.to(head_dev, non_blocking=True) for key, v in batch.items()}
                 ips_weights = torch.ones_like(batch["ips_weight"]) if no_ips else batch["ips_weight"]
 
@@ -544,7 +571,8 @@ def run_split(
     probas_np    = np.concatenate(all_probas)
     user_idxs_np = np.concatenate(all_users)
     avg_loss     = total_loss / max(len(labels_np), 1)
-    return compute_metrics(split, labels_np, probas_np, avg_loss, user_idxs=user_idxs_np)
+    return compute_metrics(split, labels_np, probas_np, avg_loss, user_idxs=user_idxs_np,
+                           cold=np.concatenate(all_cold))
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
@@ -571,6 +599,12 @@ def parse_args() -> argparse.Namespace:
                    help="Torch device (cuda / cuda:1 / mps / cpu). Auto if omitted")
     p.add_argument("--no-amp",  action="store_true",
                    help="Disable automatic mixed precision (fp16)")
+    p.add_argument("--eval-test", action="store_true",
+                   help="Score the test split at the end. Off during development so "
+                        "test is only touched for configurations being reported.")
+    p.add_argument("--no-edges", action="store_true",
+                   help="Control: drop every structural and next_in_session edge so "
+                        "each encoder sees node features only.")
     p.add_argument("--eval-only", action="store_true",
                    help="Skip training; load checkpoint and evaluate only")
     p.add_argument("--rebuild-hkg", action="store_true",
@@ -774,9 +808,13 @@ def main() -> None:
         rel_builder = lambda b: build_full_relation_edge_index(b, torch.device("cpu"), args.max_edges)
     else:
         rel_builder = lambda b: build_relation_edge_index(b.structural_graph, torch.device("cpu"), args.max_edges)
-    needed = set(np.unique(snap_of[np.r_[train_rows, val_rows, test_rows]]).tolist())
+    if args.no_edges:
+        rel_builder = lambda b: (torch.zeros(2, 0, dtype=torch.long), torch.zeros(0, dtype=torch.long))
+    eval_rows = np.r_[train_rows, val_rows, test_rows] if args.eval_test else np.r_[train_rows, val_rows]
+    needed = set(np.unique(snap_of[eval_rows]).tolist())
     t0 = time.time()
-    store = SnapshotStore(bundle, data, boundaries, rel_builder, needed=needed)
+    store = SnapshotStore(bundle, data, boundaries, rel_builder, needed=needed,
+                          drop_edges=args.no_edges)
     tqdm.write(f"      {len(needed)} snapshots prepared in {time.time()-t0:.1f}s")
     batcher = PrefixBatcher(inter)
 
@@ -907,6 +945,10 @@ def main() -> None:
         (out_dir / "history.json").write_text(json.dumps(history, indent=2))
         logger.info("Training history -> %s", out_dir / "history.json")
 
+    # Parameters that actually received gradients (encoders are frozen)
+    n_trainable = (sum(p.numel() for p in model.parameters() if p.grad is not None)
+                   if not args.eval_only else None)
+
     # ── 6. Final evaluation with the val-selected checkpoint ─────────────────
     print()
     tqdm.write("── Final evaluation (val-selected checkpoint) ──────────────")
@@ -917,8 +959,9 @@ def main() -> None:
                             optimizer=None, scaler=None, split="train", **split_kw)
     final_val   = run_split(model, val_rows, batch_size=args.batch_size * 2,
                             optimizer=None, scaler=None, split="val", **split_kw)
-    final_test  = run_split(model, test_rows, batch_size=args.batch_size * 2,
-                            optimizer=None, scaler=None, split="test", **split_kw)
+    final_test  = (run_split(model, test_rows, batch_size=args.batch_size * 2,
+                             optimizer=None, scaler=None, split="test", **split_kw)
+                   if args.eval_test else Metrics(split="test"))
 
     # ── 7. Print metrics table ────────────────────────────────────────────────
     print("\n" + "=" * 62)
@@ -943,7 +986,11 @@ def main() -> None:
     print(f"  Train pos rate : {final_train.n_pos / max(final_train.n_samples,1):>12.3f}")
     print(f"  Val   pos rate : {final_val.n_pos   / max(final_val.n_samples, 1):>12.3f}")
     print(f"  Test  pos rate : {final_test.n_pos  / max(final_test.n_samples, 1):>12.3f}")
+    print(f"  Val AUC cold/warm : {final_val.auc_cold:.4f} / {final_val.auc_warm:.4f}"
+          f"  (n_cold={final_val.n_cold:,})")
     print(f"  Best val AUC   : {best_auc:>12.4f}")
+    if not args.eval_test:
+        print("  Test not scored (pass --eval-test for a reported configuration)")
     print("=" * 62 + "\n")
 
     # ── 8. Save final metrics ─────────────────────────────────────────────────
@@ -951,8 +998,10 @@ def main() -> None:
     (out_dir / "final_metrics.json").write_text(json.dumps({
         "train": asdict(final_train),
         "val":   asdict(final_val),
-        "test":  asdict(final_test),
+        "test":  asdict(final_test) if args.eval_test else None,
         "args":  vars(args),
+        "n_params_with_grad": n_trainable,
+        "encode": _encode_summary(store.encode_log),
         "best_val_auc": best_auc,
         "t_val":  t_val,
         "t_test": t_test,
