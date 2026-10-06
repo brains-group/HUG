@@ -160,7 +160,8 @@ def main() -> None:
     p.add_argument("--user-frac",        type=float, default=None)
     p.add_argument("--label-delay-s",    type=int,   default=900)
     p.add_argument("--snapshot-features", action="store_true")
-    p.add_argument("--cache-dir",        default=str(ROOT.parent / "Framework" / "cache"))
+    # the bundle cache HUG jobs use when launched from the repo root (main.py: ./cache/1k)
+    p.add_argument("--cache-dir",        default=str(ROOT.parent / "cache" / "1k"))
     args = p.parse_args()
 
     out_dir = Path(args.out_dir or ROOT / "data" / "processed" / CSV_NAMES[args.dataset])

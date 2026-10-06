@@ -538,7 +538,8 @@ real = pytest.mark.skipif(os.environ.get("HUG_REAL_DATA") != "1", reason="set HU
 def test_real_parity_5000_rows(name):
     import hug_train
     from datasets import load_dataset
-    args = _hug_args(dataset=name, data_dir=None, cache_dir=str(Path(__file__).parent / "cache"),
+    args = _hug_args(dataset=name, data_dir=None,
+                     cache_dir=str(Path(__file__).resolve().parents[1] / "cache" / "1k"),
                      snapshot_hours=24, max_seq_len=50)
     args.data_dir = str(Path(__file__).resolve().parents[1] / {"mind": "MIND/extracted",
                                                                "zhihurec": "ZhihuRec/raw"}[name])
