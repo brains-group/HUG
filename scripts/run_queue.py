@@ -13,7 +13,8 @@ Behaviour
 - Every job runs as a subprocess from the repo root with its own run directory
   ``<runs_root>/<job>/`` (stdout.log / stderr.log go there).
 - Dependencies: explicit ``depends_on``, plus the tuning job behind every
-  ``{best:<tune_job>}`` placeholder and the stage-1 job named by a final_eval's ``of``.
+  ``{best:<tune_job>}`` placeholder, every ``{run:<job>}`` placeholder (expands to that
+  job's run directory) and the stage-1 job named by a final_eval's ``of``.
 - Config hash: sha256 over the job's resolved args (minus GPU/run-dir/logging/token
   flags), the content of any ``--params`` file, the data fingerprint and
   ``CODE_COMPAT_VERSION`` (``Framework/runtime.py``, bumped by hand only when a change
@@ -84,6 +85,7 @@ HASH_EXCLUDED_BARE_FLAGS = ("--quiet", "--resume")
 TEST_FLAGS = ("--eval-test", "--test-access-token", "--i-know-this-touches-test")
 
 BEST_PREFIX = "{best:"
+RUN_PREFIX = "{run:"
 
 TERMINAL_STATES = ("done", "skipped", "failed", "blocked")
 
@@ -124,6 +126,11 @@ class Job:
         return [a[len(BEST_PREFIX):-1] for a in self.args
                 if a.startswith(BEST_PREFIX) and a.endswith("}")]
 
+    def run_refs(self) -> list[str]:
+        """Jobs referenced by ``{run:<name>}`` placeholders (their run directory)."""
+        return [a[len(RUN_PREFIX):-1] for a in self.args
+                if a.startswith(RUN_PREFIX) and a.endswith("}")]
+
     def metadata(self) -> dict[str, Any]:
         return {"name": self.name, "kind": self.kind, "args": self.args, "seed": self.seed,
                 "memory": self.memory, "depends_on": self.depends_on, "of": self.of,
@@ -138,7 +145,7 @@ class Plan:
 
     def all_deps(self, job: Job) -> list[str]:
         """Explicit plus implicit dependencies, in a stable order without duplicates."""
-        deps = list(job.depends_on) + job.best_refs()
+        deps = list(job.depends_on) + job.best_refs() + job.run_refs()
         if job.of:
             deps.append(job.of)
         return list(dict.fromkeys(deps))
@@ -470,6 +477,8 @@ class JobQueue:
             if a.startswith(BEST_PREFIX) and a.endswith("}"):
                 ref = a[len(BEST_PREFIX):-1]
                 out += ["--params", self._rel(self.run_dir(ref) / "best.yaml")]
+            elif a.startswith(RUN_PREFIX) and a.endswith("}"):
+                out.append(self._rel(self.run_dir(a[len(RUN_PREFIX):-1])))
             else:
                 out.append(a)
         return out

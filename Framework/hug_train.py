@@ -579,6 +579,14 @@ def train(args, d: HugData, model: HUGModel, device, run_dir: Path) -> dict:
     return state
 
 
+def realised_k_private(run_dir: Path) -> int:
+    """Mean private k (over both views) at the best epoch of a finished sparse-adaptive run."""
+    m = json.loads((run_dir / "final_metrics.json").read_text())
+    best = next(h for h in m["history"] if h["epoch"] == m["best_epoch"])
+    k = best["mean_k_private"]
+    return int(round((k["G"] + k["S"]) / 2))
+
+
 def run(args) -> None:
     """Full HUG job: prepare → (train) → evaluate best on val/holdout (and test) → outputs."""
     run_dir = Path(args.run_dir)
@@ -591,6 +599,10 @@ def run(args) -> None:
         authorize_test_access(run_dir.parent, args.test_access_token,
                               args.i_know_this_touches_test, run_dir.name, args.config_hash)
 
+    if getattr(args, "k_private_fixed_from", None):
+        args.k_private_fixed = realised_k_private(Path(args.k_private_fixed_from))
+        logger.info("k_private_fixed = %d (realised mean of %s)", args.k_private_fixed,
+                    args.k_private_fixed_from)
     versions = log_versions()
     set_determinism(args.seed)
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))

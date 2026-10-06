@@ -8,6 +8,10 @@ trains each as a separate main.py job (`<out>/trial_<i>/`, holdout excluded,
 early stopping on val), selects on val AUC only, and writes `<out>/best.yaml`
 (argument overrides for `main.py --params`) plus `<out>/trials.json`.
 Finished trials are skipped on rerun.
+
+Fusion tuning (spec 05 F): `--fusion X --params <N4 best.yaml>` keeps the N4
+encoder settings fixed and searches only X's fusion space; every trial's
+params (and best.yaml) are the N4 settings merged with the fusion trial.
 """
 
 from __future__ import annotations
@@ -36,17 +40,47 @@ SPACE = {
 GRAPH_KEYS = {"graph_layers", "cl_weight"}
 ARM_FLAGS = {"N4": [], "N1": ["--no-graph"]}
 
+# Spec 05 F: fusion spaces (budgets: sparse 12, gate 4, evgate 6, moe 6, misa 8)
+LOSS_GRID = {"w_align": [0.05, 0.1, 0.2], "w_dec": [0.01, 0.1], "w_rec": [0.1, 1.0]}
+FUSION_SPACES = {
+    "sparse": {"m_shared": [128, 256, 512], "k_shared": [8, 16, 32],
+               "k_private": [(4, 32), (8, 48), (8, 64)], **LOSS_GRID},
+    "gate":   {"dropout": [0.0, 0.1, 0.2], "fusion_dim": [32, 64, 128]},
+    "evgate": {"dropout": [0.0, 0.1, 0.2], "fusion_dim": [32, 64, 128], "gate_hidden": [32, 64, 128]},
+    "moe":    {"moe_experts": [2, 4, 8], "dropout": [0.0, 0.1, 0.2]},
+    "misa":   dict(LOSS_GRID),
+}
 
-def sample_trials(arm: str, n: int, seed: int) -> list[dict]:
-    keys = [k for k in SPACE if arm != "N1" or k not in GRAPH_KEYS]
-    grid = list(itertools.product(*(SPACE[k] for k in keys)))
+
+def _expand(trial: dict) -> dict:
+    """Tied / paired fusion parameters → main.py argument names."""
+    out = dict(trial)
+    if "m_shared" in out:
+        out["m_private"] = out["m_shared"]
+    if "k_private" in out:
+        out["k_private_min"], out["k_private_max"] = out.pop("k_private")
+    return out
+
+
+def sample_trials(arm: str, n: int, seed: int, fusion: str | None = None) -> list[dict]:
+    space = FUSION_SPACES[fusion] if fusion else {k: v for k, v in SPACE.items()
+                                                  if arm != "N1" or k not in GRAPH_KEYS}
+    keys = list(space)
+    grid = list(itertools.product(*(space[k] for k in keys)))
     pick = np.random.default_rng(seed).choice(len(grid), size=min(n, len(grid)), replace=False)
-    return [dict(zip(keys, grid[i])) for i in pick]
+    trials = [_expand(dict(zip(keys, grid[i]))) for i in pick]
+    if fusion:
+        for t in trials:
+            t["fusion"] = fusion
+    return trials
 
 
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--arm", choices=sorted(ARM_FLAGS), required=True)
+    p.add_argument("--arm", choices=sorted(ARM_FLAGS), default="N4")
+    p.add_argument("--fusion", choices=sorted(FUSION_SPACES), default=None,
+                   help="tune this fusion head on top of --params (N4 settings)")
+    p.add_argument("--params", default=None, help="base settings merged into every trial")
     p.add_argument("--trials", type=int, default=16)
     p.add_argument("--seed", type=int, default=0, help="search seed (trials train with seed 42)")
     p.add_argument("--out", required=True)
@@ -58,8 +92,10 @@ def main() -> None:
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
+    base = yaml.safe_load(Path(args.params).read_text()) if args.params else {}
     results = []
-    for i, trial in enumerate(sample_trials(args.arm, args.trials, args.seed)):
+    for i, trial in enumerate(sample_trials(args.arm, args.trials, args.seed, args.fusion)):
+        trial = {**(base or {}), **trial}
         tdir = out / f"trial_{i:02d}"
         tdir.mkdir(exist_ok=True)
         (tdir / "params.yaml").write_text(yaml.safe_dump(trial))

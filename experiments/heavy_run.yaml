@@ -462,3 +462,333 @@ jobs:
     memory: light
     depends_on: []
     optional: true
+
+  # ── Stage 1b (spec 05 F): fusion tuning on top of tuned N4, then seeds ──
+  # concat = N4 (reuses hug_N4_s42/43/44). sparse-fixed uses k_fixed = the realised mean
+  # private k of hug_sparse_s42 ({run:...} expands to that job's run directory).
+  - name: tune_fusion_sparse
+    kind: tune_hug
+    args: "--fusion sparse --trials 12 --seed 0 {best:tune_hug_N4}"
+    memory: heavy
+    group: tune_fusion_sparse
+    depends_on: []
+  - name: tune_fusion_gate
+    kind: tune_hug
+    args: "--fusion gate --trials 4 --seed 0 {best:tune_hug_N4}"
+    memory: heavy
+    group: tune_fusion_gate
+    depends_on: []
+  - name: tune_fusion_evgate
+    kind: tune_hug
+    args: "--fusion evgate --trials 6 --seed 0 {best:tune_hug_N4}"
+    memory: heavy
+    group: tune_fusion_evgate
+    depends_on: []
+  - name: tune_fusion_moe
+    kind: tune_hug
+    args: "--fusion moe --trials 6 --seed 0 {best:tune_hug_N4}"
+    memory: heavy
+    group: tune_fusion_moe
+    depends_on: []
+  - name: tune_fusion_misa
+    kind: tune_hug
+    args: "--fusion misa --trials 8 --seed 0 {best:tune_hug_N4}"
+    memory: heavy
+    group: tune_fusion_misa
+    depends_on: []
+  - name: hug_sparse_s42
+    kind: hug
+    args: "{best:tune_fusion_sparse}"
+    seed: 42
+    memory: heavy
+    model: HUG
+    arm: N4-sparse
+    group: fusion_sparse
+    depends_on: []
+  - name: hug_sparse_s43
+    kind: hug
+    args: "{best:tune_fusion_sparse}"
+    seed: 43
+    memory: heavy
+    model: HUG
+    arm: N4-sparse
+    group: fusion_sparse
+    depends_on: []
+  - name: hug_sparse_s44
+    kind: hug
+    args: "{best:tune_fusion_sparse}"
+    seed: 44
+    memory: heavy
+    model: HUG
+    arm: N4-sparse
+    group: fusion_sparse
+    depends_on: []
+  - name: hug_gate_s42
+    kind: hug
+    args: "{best:tune_fusion_gate}"
+    seed: 42
+    memory: heavy
+    model: HUG
+    arm: N4-gate
+    group: fusion_gate
+    depends_on: []
+  - name: hug_gate_s43
+    kind: hug
+    args: "{best:tune_fusion_gate}"
+    seed: 43
+    memory: heavy
+    model: HUG
+    arm: N4-gate
+    group: fusion_gate
+    depends_on: []
+  - name: hug_gate_s44
+    kind: hug
+    args: "{best:tune_fusion_gate}"
+    seed: 44
+    memory: heavy
+    model: HUG
+    arm: N4-gate
+    group: fusion_gate
+    depends_on: []
+  - name: hug_evgate_s42
+    kind: hug
+    args: "{best:tune_fusion_evgate}"
+    seed: 42
+    memory: heavy
+    model: HUG
+    arm: N4-evgate
+    group: fusion_evgate
+    depends_on: []
+  - name: hug_evgate_s43
+    kind: hug
+    args: "{best:tune_fusion_evgate}"
+    seed: 43
+    memory: heavy
+    model: HUG
+    arm: N4-evgate
+    group: fusion_evgate
+    depends_on: []
+  - name: hug_evgate_s44
+    kind: hug
+    args: "{best:tune_fusion_evgate}"
+    seed: 44
+    memory: heavy
+    model: HUG
+    arm: N4-evgate
+    group: fusion_evgate
+    depends_on: []
+  - name: hug_moe_s42
+    kind: hug
+    args: "{best:tune_fusion_moe}"
+    seed: 42
+    memory: heavy
+    model: HUG
+    arm: N4-moe
+    group: fusion_moe
+    depends_on: []
+  - name: hug_moe_s43
+    kind: hug
+    args: "{best:tune_fusion_moe}"
+    seed: 43
+    memory: heavy
+    model: HUG
+    arm: N4-moe
+    group: fusion_moe
+    depends_on: []
+  - name: hug_moe_s44
+    kind: hug
+    args: "{best:tune_fusion_moe}"
+    seed: 44
+    memory: heavy
+    model: HUG
+    arm: N4-moe
+    group: fusion_moe
+    depends_on: []
+  - name: hug_misa_s42
+    kind: hug
+    args: "{best:tune_fusion_misa}"
+    seed: 42
+    memory: heavy
+    model: HUG
+    arm: N4-misa
+    group: fusion_misa
+    depends_on: []
+  - name: hug_misa_s43
+    kind: hug
+    args: "{best:tune_fusion_misa}"
+    seed: 43
+    memory: heavy
+    model: HUG
+    arm: N4-misa
+    group: fusion_misa
+    depends_on: []
+  - name: hug_misa_s44
+    kind: hug
+    args: "{best:tune_fusion_misa}"
+    seed: 44
+    memory: heavy
+    model: HUG
+    arm: N4-misa
+    group: fusion_misa
+    depends_on: []
+  - name: hug_sparsefixed_s42
+    kind: hug
+    args: "{best:tune_fusion_sparse} --k-schedule fixed --k-private-fixed-from {run:hug_sparse_s42}"
+    seed: 42
+    memory: heavy
+    model: HUG
+    arm: N4-sparse-fixed
+    group: fusion_sparse_fixed
+    depends_on: []
+  - name: hug_sparsefixed_s43
+    kind: hug
+    args: "{best:tune_fusion_sparse} --k-schedule fixed --k-private-fixed-from {run:hug_sparse_s42}"
+    seed: 43
+    memory: heavy
+    model: HUG
+    arm: N4-sparse-fixed
+    group: fusion_sparse_fixed
+    depends_on: []
+  - name: hug_sparsefixed_s44
+    kind: hug
+    args: "{best:tune_fusion_sparse} --k-schedule fixed --k-private-fixed-from {run:hug_sparse_s42}"
+    seed: 44
+    memory: heavy
+    model: HUG
+    arm: N4-sparse-fixed
+    group: fusion_sparse_fixed
+    depends_on: []
+  - name: hug_sparse_noalign_s42
+    kind: hug
+    args: "{best:tune_fusion_sparse} --w-align 0"
+    seed: 42
+    memory: heavy
+    model: HUG
+    arm: N4-sparse-noalign
+    group: fusion_sparse_noalign
+    depends_on: []
+  - name: hug_sparse_nodec_s42
+    kind: hug
+    args: "{best:tune_fusion_sparse} --w-dec 0"
+    seed: 42
+    memory: heavy
+    model: HUG
+    arm: N4-sparse-nodec
+    group: fusion_sparse_nodec
+    depends_on: []
+  - name: hug_sparse_norec_s42
+    kind: hug
+    args: "{best:tune_fusion_sparse} --w-rec 0"
+    seed: 42
+    memory: heavy
+    model: HUG
+    arm: N4-sparse-norec
+    group: fusion_sparse_norec
+    depends_on: []
+
+  # ── Stage 2 for Stage 1b ──
+  - name: final_eval_hug_sparse_s42
+    kind: final_eval
+    of: hug_sparse_s42
+    memory: heavy
+    depends_on: []
+  - name: final_eval_hug_sparse_s43
+    kind: final_eval
+    of: hug_sparse_s43
+    memory: heavy
+    depends_on: []
+  - name: final_eval_hug_sparse_s44
+    kind: final_eval
+    of: hug_sparse_s44
+    memory: heavy
+    depends_on: []
+  - name: final_eval_hug_gate_s42
+    kind: final_eval
+    of: hug_gate_s42
+    memory: heavy
+    depends_on: []
+  - name: final_eval_hug_gate_s43
+    kind: final_eval
+    of: hug_gate_s43
+    memory: heavy
+    depends_on: []
+  - name: final_eval_hug_gate_s44
+    kind: final_eval
+    of: hug_gate_s44
+    memory: heavy
+    depends_on: []
+  - name: final_eval_hug_evgate_s42
+    kind: final_eval
+    of: hug_evgate_s42
+    memory: heavy
+    depends_on: []
+  - name: final_eval_hug_evgate_s43
+    kind: final_eval
+    of: hug_evgate_s43
+    memory: heavy
+    depends_on: []
+  - name: final_eval_hug_evgate_s44
+    kind: final_eval
+    of: hug_evgate_s44
+    memory: heavy
+    depends_on: []
+  - name: final_eval_hug_moe_s42
+    kind: final_eval
+    of: hug_moe_s42
+    memory: heavy
+    depends_on: []
+  - name: final_eval_hug_moe_s43
+    kind: final_eval
+    of: hug_moe_s43
+    memory: heavy
+    depends_on: []
+  - name: final_eval_hug_moe_s44
+    kind: final_eval
+    of: hug_moe_s44
+    memory: heavy
+    depends_on: []
+  - name: final_eval_hug_misa_s42
+    kind: final_eval
+    of: hug_misa_s42
+    memory: heavy
+    depends_on: []
+  - name: final_eval_hug_misa_s43
+    kind: final_eval
+    of: hug_misa_s43
+    memory: heavy
+    depends_on: []
+  - name: final_eval_hug_misa_s44
+    kind: final_eval
+    of: hug_misa_s44
+    memory: heavy
+    depends_on: []
+  - name: final_eval_hug_sparsefixed_s42
+    kind: final_eval
+    of: hug_sparsefixed_s42
+    memory: heavy
+    depends_on: []
+  - name: final_eval_hug_sparsefixed_s43
+    kind: final_eval
+    of: hug_sparsefixed_s43
+    memory: heavy
+    depends_on: []
+  - name: final_eval_hug_sparsefixed_s44
+    kind: final_eval
+    of: hug_sparsefixed_s44
+    memory: heavy
+    depends_on: []
+  - name: final_eval_hug_sparse_noalign_s42
+    kind: final_eval
+    of: hug_sparse_noalign_s42
+    memory: heavy
+    depends_on: []
+  - name: final_eval_hug_sparse_nodec_s42
+    kind: final_eval
+    of: hug_sparse_nodec_s42
+    memory: heavy
+    depends_on: []
+  - name: final_eval_hug_sparse_norec_s42
+    kind: final_eval
+    of: hug_sparse_norec_s42
+    memory: heavy
+    depends_on: []

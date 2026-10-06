@@ -604,6 +604,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     f.add_argument("--k-private-max", type=int, default=48)
     f.add_argument("--k-schedule", default="adaptive", choices=["adaptive", "fixed"])
     f.add_argument("--k-private-fixed", type=int, default=24)
+    f.add_argument("--k-private-fixed-from", default=None,
+                   help="set --k-private-fixed to the realised mean private k of this finished "
+                        "sparse-adaptive run directory (spec 05 B4 ablation)")
     f.add_argument("--w-rec", type=float, default=1.0)
     f.add_argument("--w-align", type=float, default=0.1)
     f.add_argument("--w-dec", type=float, default=0.1)

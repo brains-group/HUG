@@ -609,3 +609,21 @@ class TestCodeCompatHash:
         self._repo(tmp_path / "repo", 2)                                # bump
         make_queue(tmp_path, launcher, code_fp=rq.code_compat_key(repo)).run()
         assert len(launcher.launches) > n_first
+
+
+def test_run_placeholder_expands_and_adds_dependency(tmp_path):
+    plan = {"defaults": {}, "jobs": [
+        {"name": "a", "kind": "hug", "args": "", "seed": 42, "memory": "heavy"},
+        {"name": "b", "kind": "hug", "args": "--k-private-fixed-from {run:a}", "seed": 42,
+         "memory": "heavy"},
+    ]}
+    p = rq.parse_plan(plan)
+    rq.validate_plan(p)
+    assert p.all_deps(p.jobs["b"]) == ["a"]
+    q = make_queue(tmp_path, StubLauncher(tmp_path), plan)
+    resolved = q.resolve_args(p.jobs["b"].args)
+    assert resolved[-1].endswith("runs/heavy/a") and "{run:" not in " ".join(resolved)
+    bad = {"defaults": {}, "jobs": [{"name": "b", "kind": "hug", "args": "{run:zzz}",
+                                     "seed": 1, "memory": "heavy"}]}
+    with pytest.raises(rq.PlanError):
+        rq.validate_plan(rq.parse_plan(bad))
