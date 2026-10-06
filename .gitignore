@@ -215,3 +215,6 @@ cache/
 FuxiCTR/
 checkpoints/
 Baselines/data
+
+# Model checkpoints (large once ID embeddings exist); keep metrics/logs only
+runs/**/*.pt

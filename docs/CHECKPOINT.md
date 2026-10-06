@@ -1,7 +1,7 @@
 # HUG — Revision Checkpoint
 
 **Last updated:** 2026-10-06
-**Branch:** `docs/technical-report-and-revision-plan` (changes below are uncommitted at time of writing)
+**Branch:** `docs/technical-report-and-revision-plan` (committed; spec 01 landed on top of `cabf8c9`)
 **Purpose:** current state of the revision for whoever acts as architect / reviewer. Read this
 first, then `docs/TECHNICAL_REPORT.md` (findings F1–F14) and `docs/REVISION_WORKFLOW.md`.
 
@@ -39,7 +39,12 @@ number until you know which protocol produced it.
   - video→video `next_in_session`.
 
 **HUG-Dual.**
-- `StructuralGNN`: R-GCN, 7 relations, at most 200k randomly sampled edges per relation.
+- `StructuralGNN`: R-GCN over 14 relations: the 7 in `REL_MAP` plus their reverses, so users
+  and videos receive messages (spec 01).
+  - Edges are uncapped: one master index of 28.4M edges on KuaiRand-1K, masked per snapshot by
+    `edge_time < boundary`.
+  - Authors and categories have ID embeddings (fixed random while the encoders are frozen).
+  - The unused GAT refinement was removed.
 - `SequentialGNN`: GGNN, followed by an attention readout and a recency gate.
 - `AlignmentModule`, then the MLP head. The module's "cross-attention" takes a softmax over
   heads with a single key, so it's degenerate (F6).
@@ -47,6 +52,8 @@ number until you know which protocol produced it.
 **HUG-Unified.**
 - `SingleHGT` over the full graph, then concat(user, video), then the MLP head. It ignores
   session embeddings.
+- It uses the same reverse types (except `next_in_session`) and the same author/category ID
+  embeddings as Dual.
 - Agreed framing: a **controlled ablation baseline, not a contribution**. To be fair it needs
   the same fusion/head and inputs as Dual, and a matched parameter count.
 
@@ -59,8 +66,8 @@ between three directions:
 3. per-view self-supervised pretraining (link prediction / next-item), then fusion.
 
 **Other facts.**
-- Author and category nodes have all-zero input features, so the KG side contributes almost
-  nothing at L=1.
+- Spec 01 measured what the graph contributes (see "Spec 01 results" below). With frozen random
+  encoders, every graph run is *below* its features-only control.
 - Agreed to remove the KGA gate (never executes, F4), IPS (no-op, F5) and the recency gate.
   **None of these is removed from the code yet**: the user is still designing HUG.
 
@@ -110,7 +117,9 @@ between three directions:
   `--max-seq-len` items, same session, strictly earlier time).
 - `snapshot_boundaries` / `assign_snapshots`: a daily grid by default (`--snapshot-hours`), with
   `t_val` and `t_test` inserted. A row at time t uses the snapshot at a boundary `b_k <= t`.
-- `SnapshotStore`: per-snapshot video features and sampled relation edges, computed once.
+- `SnapshotStore`: per-snapshot video features, computed once. Relation edges are a single
+  master index; `rel(k, device)` returns the mask `edge_time < boundary_k`, with no per-snapshot
+  copies.
 - `PrefixBatcher`.
 
 ### `Framework/gnn_encoders.py`
@@ -133,10 +142,17 @@ between three directions:
 - `final_metrics.json` goes in the run-specific directory (F12). Checkpoints are loaded only
   with `--eval-only`.
 - Flags:
-  - new: `--val-ratio`, `--snapshot-hours`, `--warmup-hours`;
+  - new: `--val-ratio`, `--snapshot-hours`, `--warmup-hours` (defaults to `--snapshot-hours`);
+  - new: `--eval-test` (off by default; test is scored only for configurations being reported);
+  - new: `--no-edges` (features-only control);
   - removed: `--chunk-size`, along with the 27K chunked and dual-GPU encode paths;
+  - removed: `--max-edges` (spec 01);
   - `--multi-gpu` still works for the dual model via `split_across_gpus`.
 - The encoders always run in eval mode while encoding.
+- Metrics also report validation AUC for cold vs warm candidate videos (0–1 vs ≥2 earlier
+  interactions in the snapshot), per-snapshot encode time and peak GPU memory, and the number
+  of parameters that receive gradients.
+- The HKG cache carries `HKG_BUILD_VERSION` and is written atomically.
 
 ### `Framework/tests.py`
 - `TestCausality` checks:
@@ -149,6 +165,12 @@ between three directions:
   must be bit-identical. The test also asserts that rows after T *do* change, so it can't pass
   vacuously.
 - Real-data test: 1,000 test-only (user, video) pairs must be absent from the graph.
+- `TestGraphConnectivity` (spec 01):
+  - reverse completeness, for both the R-GCN and the HGT;
+  - reverse edges are causal in every snapshot;
+  - the master mask equals a per-view build;
+  - users receive graph signal;
+  - the KG reaches videos and users only along paths.
 
 ### `Baselines/`
 - **`preprocess.py`**
@@ -184,13 +206,14 @@ log identical cutoffs and row counts.
 
 | Check | Status |
 |---|---|
-| Synthetic test suite (incl. `TestCausality`, invariance test) | 57 passed, 28 skipped (real-data tests need `--data-dir`) |
+| Synthetic test suite (incl. `TestCausality`, `TestGraphConnectivity`, invariance test) | 63 passed, 28 skipped (real-data tests need `--data-dir`) |
 | `main.py` dual + single, synthetic data | runs end to end |
 | HUG and baseline splits match on real data | yes (table above) |
 | TransAct, 1 epoch, real data | runs; see note below |
 | WuKong, 1 epoch, real data | runs; val AUC 0.643 / LogLoss 0.735, test AUC 0.632 / LogLoss 0.672; train loss 0.328 (197M params) |
-| Real-data test suite (vectorised build) | 27 passed in 90 s, incl. 1,000 test-only pairs absent from the graph. `test_real_model_forward_backward` excluded: it calls the legacy end-to-end `forward()` with the per-session Python loop (F11) and runs for hours on CPU; the training pipeline no longer uses that path |
-| HUG-Dual, 1 epoch, real data, snapshot protocol | runs; AUC train 0.686 / val 0.682 / test 0.682, LogLoss 0.612 / 0.618 / 0.615. HKG build 42 s, 34 daily snapshots prepared in 2 min, 212 s/epoch, 55 GB GPU reserved |
+| Real-data test suite | 28 passed in about 2 min, incl. 1,000 test-only pairs absent from the graph. `test_real_model_forward_backward` now exercises the training path (`encode_graph` → `forward_from_embeddings` → backward) |
+| HUG-Dual, 1 epoch, real data, snapshot protocol (R0, pre-spec-01) | runs; AUC train 0.686 / val 0.682 / test 0.682, LogLoss 0.612 / 0.618 / 0.615. HKG build 42 s, 34 daily snapshots prepared in 2 min, 212 s/epoch, 55 GB GPU reserved. Test was scored before `--eval-test` existed |
+| Spec 01 runs (R0-noedge, R1, R2, R3, R3-noedge) | done, validation only; see below |
 
 **TransAct note.**
 - With whole-window item statistics: validation AUC 0.546, LogLoss 3.7.
@@ -218,6 +241,24 @@ unlike TransAct before its statistics fix. Encoders are still frozen at random i
 **These are 1-epoch smoke numbers, not results.** Every number in the paper and under `runs/`
 from before this checkpoint was produced under the leaky protocol and is void.
 
+## Spec 01 results (validation only, 1 epoch, seed 42)
+
+Full write-up: `docs/specs/01-graph-connectivity-results.md`. Artefacts: `runs/spec01/`.
+
+| Run | AUC | Cold | Warm | LogLoss |
+|---|---|---|---|---|
+| `global_cvr` alone | 0.589 | 0.512 | 0.633 | — |
+| R0 (one-way, capped, zero KG inputs) | 0.682 | 0.669 | 0.679 | 0.618 |
+| R0-noedge (features only) | **0.694** | **0.679** | 0.694 | **0.610** |
+| R1 (+ reverse) | 0.661 | 0.651 | 0.650 | 0.632 |
+| R2 (+ author/category IDs) | 0.669 | 0.659 | 0.660 | 0.623 |
+| R3 (full spec, uncapped) | 0.678 | 0.667 | 0.668 | 0.644 |
+| R3-noedge (features only) | 0.692 | 0.673 | **0.697** | 0.613 |
+
+**With frozen random encoders the graph hurts:** R3 vs R3-noedge is −0.014 AUC, with worse
+calibration. Connectivity fixes help relative to R1 but don't close the gap. The next step is
+learned or pretrained encoders, and the features-only control must be reported alongside them.
+
 ## Open issues to review or decide
 
 1. **HUG methodology:** frozen random encoders, trained, or pretrained (the user's open
@@ -237,13 +278,12 @@ from before this checkpoint was produced under the leaky protocol and is void.
    - F8 (both encoders share depth);
    - F10 (HGT softmax normalisation);
    - F13 (single seed; no multi-seed harness yet);
-   - random 200k-edge sampling per relation;
    - HUG-Unified is not yet a fair control (no session input, different head).
 6. **Behaviour changes to confirm:**
    - the transition graph is no longer truncated to the last 50 items per session;
    - the prefix readout keeps duplicate items (the old readout deduplicated session nodes);
-   - with `--warmup-hours 0` (the default), first-day training rows are encoded from
-     near-empty graphs.
+   - `--warmup-hours` now defaults to `--snapshot-hours`, so HUG trains on slightly fewer rows
+     than the baselines. Validation and test are unaffected.
 7. Stale artefacts: the old `hkg_bundle.pkl` caches are ignored, and the old checkpoints in
    `runs/` are void.
 8. **Training order:** inputs are causal everywhere, but training rows are shuffled, so weights
@@ -256,8 +296,8 @@ from before this checkpoint was produced under the leaky protocol and is void.
 
 ```bash
 # HUG (dual; add --model-type single for HUG-Unified)
-python Framework/main.py --data-dir KuaiRand-1K/data --cache-dir Framework/cache/1K \
-    --output-dir runs --device cuda:0
+python Framework/main.py --data-dir KuaiRand-1K/data --cache-dir Framework/cache \
+    --output-dir runs --device cuda:0          # add --eval-test only for reported configs
 
 # Baselines
 bash Baselines/setup_fuxictr.sh
