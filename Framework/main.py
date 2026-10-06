@@ -622,9 +622,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     f.add_argument("--k-private-fixed-from", default=None,
                    help="set --k-private-fixed to the realised mean private k of this finished "
                         "sparse-adaptive run directory (spec 05 B4 ablation)")
-    f.add_argument("--w-rec", type=float, default=1.0)
-    f.add_argument("--w-align", type=float, default=0.1)
+    # spec 05b §1: L_rec is a per-dimension mean and L_align is normalised to chance = 1
+    f.add_argument("--w-rec", type=float, default=0.1)
+    f.add_argument("--w-align", type=float, default=0.3)
     f.add_argument("--w-dec", type=float, default=0.1)
+    f.add_argument("--fusion-dense-skip", action="store_true",
+                   help="sparse/misa: also feed the dense projections p_G, p_S to the head (spec 05b §3)")
+    f.add_argument("--epoch-holdout", action="store_true",
+                   help="also score the training holdout after every epoch (probe runs)")
     f.add_argument("--gate-hidden", type=int, default=64)
     f.add_argument("--moe-experts", type=int, default=4)
     f.add_argument("--init-from", default=None,

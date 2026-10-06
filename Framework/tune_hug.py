@@ -43,7 +43,8 @@ GRAPH_KEYS = {"graph_layers", "cl_weight"}
 ARM_FLAGS = {"N4": [], "N1": ["--no-graph"]}
 
 # Spec 05 F: fusion spaces (budgets: sparse 12, gate 4, evgate 6, moe 6, misa 8)
-LOSS_GRID = {"w_align": [0.05, 0.1, 0.2], "w_dec": [0.01, 0.1], "w_rec": [0.1, 1.0]}
+# Spec 05b §5: weights for the rescaled losses (L_rec per-dimension mean, L_align / log n)
+LOSS_GRID = {"w_align": [0.1, 0.3, 1.0], "w_dec": [0.01, 0.1], "w_rec": [0.03, 0.1, 0.3]}
 FUSION_SPACES = {
     "sparse": {"m_shared": [128, 256, 512], "k_shared": [8, 16, 32],
                "k_private": [(4, 32), (8, 48), (8, 64)], **LOSS_GRID},

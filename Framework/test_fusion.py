@@ -42,8 +42,8 @@ def test_topk_exact_and_monotone():
         assert ((sh[v] != 0).sum(-1) <= 3).all()
         assert ((pr[v] != 0).sum(-1) <= kp[:, i]).all()
         # exactly k when the ReLU leaves enough positive entries
-        a = torch.relu(f.enc[v](p[v]))
-        ok = (a[:, f.m_sh:] > 0).sum(-1) >= kp[:, i]
+        a = torch.relu(f.enc_pr[v](p[v]))
+        ok = (a > 0).sum(-1) >= kp[:, i]
         assert ((pr[v] != 0).sum(-1)[ok] == kp[ok, i]).all()
     assert (kp >= 2).all() and (kp <= 8).all()
     grid = torch.linspace(0, 10, 50).unsqueeze(1).repeat(1, 2)
@@ -202,17 +202,13 @@ def test_gradient_routing():
     f.set_n_ref([3.0, 3.0])
     g = _grads(f, w_rec=1.0)
     assert not any(v for n, v in g.items() if n.startswith("proj_"))      # detached target
-    assert g["D_sh"] and g["D_pr.G"] and g["enc.G.weight"]
+    assert g["D_sh"] and g["D_pr.G"] and g["enc_sh.weight"] and g["enc_pr.G.weight"]
     g = _grads(f, w_align=1.0)
     assert not g["D_pr.G"] and not g["D_pr.S"]
-    assert g["proj_G.0.weight"]
-    # only shared encoder rows get alignment gradient
-    f.zero_grad(); f.w_rec = f.w_dec = 0; f.w_align = 1.0
-    f.fuse(*_views())["aux_loss"].backward()
-    assert f.enc["G"].weight.grad[f.m_sh:].abs().sum() == 0
-    f.zero_grad(); f.w_align = 0; f.w_dec = 1.0
-    f.fuse(*_views())["aux_loss"].backward()
-    assert f.enc["G"].weight.grad[:f.m_sh].abs().sum() == 0
+    assert g["proj_G.0.weight"] and g["enc_sh.weight"]
+    assert not g["enc_pr.G.weight"] and not g["enc_pr.S.weight"]     # alignment: shared only
+    g = _grads(f, w_dec=1.0)
+    assert not g["enc_sh.weight"] and g["enc_pr.G.weight"] and g["enc_pr.S.weight"]   # private only
 
 
 # 5 ─────────────────────────────────────────────────────────────────────────────
@@ -233,31 +229,133 @@ def test_dead_atom_resampling():
     f = _sparse()
     f.set_n_ref([3.0, 3.0])
     with torch.no_grad():                   # private-G atom 0 can never fire …
-        f.enc["G"].weight[f.m_sh + 0] = 0.0
-        f.enc["G"].bias[f.m_sh + 0] = -100.0
+        f.enc_pr["G"].weight[0] = 0.0
+        f.enc_pr["G"].bias[0] = -100.0
     f.fuse(*_views())
     opt = torch.optim.Adam(f.parameters(), lr=1e-3)
     out = f.fuse(*_views())
     (out["logit"].sum() + out["aux_loss"]).backward()
     opt.step()                                  # populate Adam moments
     f.fuse(*_views())
-    f.idle_G[0] = 9_999                     # … and has been idle long enough to be dead
+    f.idle_G[0] = 99                        # … and has been idle long enough to be dead
     live_before = f.D_pr["G"].data[1:].clone()
     old0 = f.D_pr["G"].data[0].clone()
-    st_D, st_W = opt.state[f.D_pr["G"]], opt.state[f.enc["G"].weight]
+    st_D, st_W = opt.state[f.D_pr["G"]], opt.state[f.enc_pr["G"].weight]
     live_m = st_D["exp_avg"][1:].clone()
-    f.track_and_resample(step=1000, every=1000, dead_after=10_000, optimizer=opt)
+    f.track_and_resample(step=100, every=100, dead_after=100, optimizer=opt)
     assert not torch.equal(f.D_pr["G"].data[0], old0)
     assert torch.equal(f.D_pr["G"].data[1:], live_before)
     assert f.idle_G[0] == 0
     # optimiser moments zeroed for the reset dictionary and encoder rows only
-    row = f.m_sh + 0
     for key in ("exp_avg", "exp_avg_sq"):
         assert (st_D[key][0] == 0).all()
-        assert (st_W[key][row] == 0).all()
-        assert opt.state[f.enc["G"].bias][key][row] == 0
+        assert (st_W[key][0] == 0).all()
+        assert opt.state[f.enc_pr["G"].bias][key][0] == 0
     assert torch.equal(st_D["exp_avg"][1:], live_m)
-    assert st_W["exp_avg_sq"][f.m_sh + 1:].abs().sum() > 0
+    assert st_W["exp_avg_sq"][1:].abs().sum() > 0
+
+
+# ── spec 05b ──────────────────────────────────────────────────────────────────
+def test_05b_loss_scales_at_init():
+    """L_rec ≈ 2 (two views, per-dimension mean) and L_align ≈ 1 (chance) at init; aux/bce < 2."""
+    from fusion import SparseSPFusion
+    torch.manual_seed(0)
+    f = SparseSPFusion(48, 32, 8, 64, 0.0)                    # defaults: w 0.1 / 0.3 / 0.1
+    f.set_n_ref([3.0, 3.0])
+    g = torch.Generator().manual_seed(1)
+    B = 4096
+    e_G, e_S = torch.randn(B, 48, generator=g), torch.randn(B, 32, generator=g)
+    ctx, ev = torch.randn(B, 8, generator=g), torch.rand(B, 2, generator=g) * 5
+    p = dict(zip(("G", "S"), f.project(e_G, e_S)))
+    sh, pr = f.codes(p, ev)
+    rec = sum((p[v] - (sh[v] @ f.D_sh + pr[v] @ f.D_pr[v])).pow(2).mean(-1).mean() for v in p)
+    # spec says ≈ 2 (p_v alone); random unit atoms add ≈ 0.8/dim/view at init (measured 3.55)
+    assert 1.5 < float(rec) < 4.5
+    from fusion import align_loss
+    assert 0.9 < float(align_loss(sh["G"], sh["S"], 0.2)) < 1.1
+    out = f.fuse(e_G, e_S, ctx, ev)
+    bce = torch.nn.functional.binary_cross_entropy_with_logits(
+        out["logit"], torch.randint(0, 2, (B,), generator=g).float())
+    assert float(out["aux_loss"]) / float(bce) < 2.0
+
+
+def test_05b_align_uses_1024_rows():
+    from fusion import ALIGN_ROWS, align_loss
+    torch.manual_seed(0)
+    z = torch.randn(5000, 16)
+    # perfectly aligned views: loss well below chance; computed on a 1024-row subset
+    assert float(align_loss(z, z.clone(), 0.05)) < 0.2
+    assert ALIGN_ROWS == 1024
+
+
+def test_05b_one_shared_encoder():
+    f = _sparse()
+    f.set_n_ref([3.0, 3.0])
+    assert not hasattr(f, "enc")
+    assert f.enc_sh.weight.shape == (f.m_sh, 8)
+    e_G, e_S, ctx, ev = _views()
+    for view in ("G", "S"):               # a gradient from either view reaches E_sh
+        f.zero_grad()
+        p = dict(zip(("G", "S"), f.project(e_G, e_S)))
+        sh, _ = f.codes(p, ev)
+        sh[view].sum().backward()
+        assert f.enc_sh.weight.grad.abs().sum() > 0
+        assert f.enc_pr["G"].weight.grad is None and f.enc_pr["S"].weight.grad is None
+
+
+def test_05b_dead_window_in_rows(hug_data):
+    """dead_after = one epoch's rows in steps; resampled at the next 100-step check only then."""
+    import math
+    import hug_train
+    args = _hug_args(fusion="sparse", max_epochs=1)
+    m = hug_train.build(args, hug_data)
+    steps = math.ceil(len(hug_data.train_rows) / args.batch_size)
+    f = _sparse()
+    f.set_n_ref([3.0, 3.0])
+    f.dead_after = 250                      # e.g. 2M rows / 8192
+    f.fuse(*_views())
+    with torch.no_grad():
+        f.enc_pr["G"].weight[[0, 1]] = 0.0
+        f.enc_pr["G"].bias[[0, 1]] = -100.0
+    f.fuse(*_views())
+    f.idle_G[0], f.idle_G[1] = 249, 200      # atom 0 reaches the window at step 300, atom 1 not
+    old = f.D_pr["G"].data[:2].clone()
+    f.track_and_resample(step=299)           # not a check step
+    assert torch.equal(f.D_pr["G"].data[:2], old)
+    f.track_and_resample(step=300)           # check: atom 0 idle 251 ≥ 250, atom 1 idle 202
+    assert not torch.equal(f.D_pr["G"].data[0], old[0])
+    assert torch.equal(f.D_pr["G"].data[1], old[1])
+    # no check before one epoch's worth of steps has run
+    f.idle_G[1] = 10_000
+    f.dead_after = 10_000
+    f.track_and_resample(step=300)
+    assert torch.equal(f.D_pr["G"].data[1], old[1])
+    # the trainer sets the window from the training rows
+    import tempfile
+    from pathlib import Path
+    with tempfile.TemporaryDirectory() as tmp:
+        hug_train.train(args, hug_data, m, torch.device("cpu"), Path(tmp))
+    assert m.head.dead_after == steps
+
+
+@pytest.mark.parametrize("fusion", ["sparse", "misa"])
+def test_05b_dense_skip_width(hug_data, fusion):
+    import hug_train
+    base = hug_train.build(_hug_args(fusion=fusion), hug_data)
+    skip = hug_train.build(_hug_args(fusion=fusion, fusion_dense_skip=True), hug_data)
+    w0, w1 = base.head.head[0].in_features, skip.head.head[0].in_features
+    fd = base.head.proj_G[0].out_features
+    assert w1 - w0 == 2 * fd
+    if fusion == "sparse":
+        ctx = w0 - (base.head.m_sh + 2 * base.head.m_pr)
+        assert w1 == 2 * fd + base.head.m_sh + 2 * base.head.m_pr + ctx
+    snaps = hug_train.Snapshots(hug_data, skip, torch.device("cpu"))
+    b = hug_train.HugBatcher(hug_data, 5)(hug_data.train_rows[:32])
+    vx = snaps.enter(int(hug_data.snap[hug_data.train_rows[0]]))
+    skip.train()
+    out = skip(b, vx, skip.graph_tables(vx, train=True), train=True)
+    out["loss"].backward()
+    assert torch.isfinite(out["loss"])
 
 
 # 7 ─────────────────────────────────────────────────────────────────────────────

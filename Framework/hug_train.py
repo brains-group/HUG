@@ -341,14 +341,19 @@ VAL_CODE_SAMPLE = 200_000
 
 class FusionStats:
     """
-    Accumulates sparse-fusion diagnostics over an eval pass: per-row ρ and active
-    counts, shared-atom co-activation, per-row Jaccard of the views' shared sets,
-    and the codes of a fixed row sample (seed 0) for val_codes.npz.
+    Accumulates sparse-fusion diagnostics over an eval pass: per-row ρ, active counts and
+    private budgets k_pr, shared-atom co-activation, per-row Jaccard of the views' shared
+    sets, atoms that never fire per dictionary, and the codes of a fixed row sample
+    (seed 0) for val_codes.npz.
     """
 
-    def __init__(self, m_shared: int, sample_rows: np.ndarray) -> None:
+    def __init__(self, m_shared: int, sample_rows: np.ndarray, m_private: int | None = None) -> None:
         self.rows, self.rho, self.active = [], [], {k: [] for k in
                                                      ("sh_G", "sh_S", "pr_G", "pr_S")}
+        self.k_pr = {"G": [], "S": []}
+        m_private = m_shared if m_private is None else m_private
+        self.fired = {"sh_G": np.zeros(m_shared, bool), "sh_S": np.zeros(m_shared, bool),
+                      "pr_G": np.zeros(m_private, bool), "pr_S": np.zeros(m_private, bool)}
         self.fire_any = np.zeros(m_shared, dtype=np.int64)
         self.fire_both = np.zeros(m_shared, dtype=np.int64)
         self.jaccard = []
@@ -360,6 +365,11 @@ class FusionStats:
         self.rho.append(stats["rho"].cpu().numpy())
         for k in self.active:
             self.active[k].append(stats[f"active_{k}"].cpu().numpy())
+        for v in ("G", "S"):
+            if f"k_pr_{v}" in stats:
+                self.k_pr[v].append(stats[f"k_pr_{v}"].cpu().numpy())
+        for k in self.fired:
+            self.fired[k] |= (codes[k] > 0).any(0).cpu().numpy()
         g, s_ = codes["sh_G"] > 0, codes["sh_S"] > 0
         self.fire_any += (g | s_).sum(0).cpu().numpy()
         self.fire_both += (g & s_).sum(0).cpu().numpy()
@@ -394,6 +404,15 @@ class FusionStats:
         out["shared_coactivation_fraction"] = float((co >= 0.01)[fired].mean()) if fired.any() else 0.0
         out["shared_never_fired_fraction"] = float((~fired).mean())
         out["shared_jaccard_mean"] = float(np.concatenate(self.jaccard).mean())
+        out["never_fired_fraction"] = {k: float(1 - f.mean()) for k, f in self.fired.items()}
+        if self.k_pr["G"]:
+            kp = {v: np.concatenate(x) for v, x in self.k_pr.items()}
+            out["k_pr_by_evidence_quintile"] = {
+                f"n_{v}_quintile": {k: {"min": int(kp[v][keys[rows] == k].min()),
+                                        "mean": float(kp[v][keys[rows] == k].mean()),
+                                        "max": int(kp[v][keys[rows] == k].max())}
+                                    for k in np.unique(keys[rows])}
+                for v in ("G", "S") for keys in [buckets[f"n_{v}_quintile"]]}
         return out
 
     def save_codes(self, path: Path) -> None:
@@ -504,6 +523,9 @@ def train(args, d: HugData, model: HUGModel, device, run_dir: Path) -> dict:
         logger.info("Resumed from %s at epoch %d", last, state["epoch"])
 
     train_snaps = np.unique(d.snap[d.train_rows])
+    if hasattr(model.head, "dead_after"):
+        # spec 05b §4: dead = no firing over one epoch's worth of training rows
+        model.head.dead_after = int(np.ceil(len(d.train_rows) / args.batch_size))
     stop = False
     while state["epoch"] < args.max_epochs and not stop:
         epoch = state["epoch"] + 1
@@ -547,10 +569,14 @@ def train(args, d: HugData, model: HUGModel, device, run_dir: Path) -> dict:
         prog.close()
 
         max_snaps = 2 if args.max_steps else None
-        val_m, _ = evaluate("val", model, d, d.val_rows, snaps, batcher, args, device, max_snaps)
+        fst = (FusionStats(model.head.m_sh, np.zeros(0, np.int64), model.head.m_pr)
+               if getattr(model, "fusion", "concat") == "sparse" else None)
+        val_m, _ = evaluate("val", model, d, d.val_rows, snaps, batcher, args, device, max_snaps,
+                            fst)
         sched.step(val_m.auc)
         rec = {"epoch": epoch, "train_bce": tot / max(n_seen, 1), "train_cl": cl_tot / max(n_seen, 1),
                "train_aux": aux_tot / max(n_seen, 1),
+               "aux_over_bce": (aux_tot / max(tot, 1e-12)),
                "val": asdict(val_m), "lr": opt.param_groups[0]["lr"],
                "seconds": round(time.time() - t0, 1)}
         if device.type == "cuda":
@@ -559,7 +585,13 @@ def train(args, d: HugData, model: HUGModel, device, run_dir: Path) -> dict:
             rec["relation_weights"] = model.gcn.relation_weights().cpu().tolist()
         if hasattr(model.head, "renormalize"):
             rec["dead_atom_fraction"] = dead
+            rec["dead_after_steps"] = model.head.dead_after
             rec["mean_k_private"] = {v: kp_sum[v] / max(n_seen, 1) for v in kp_sum}
+        if fst is not None:
+            rec["val_fusion_stats"] = fst.summary(d)
+        if getattr(args, "epoch_holdout", False):
+            hold_m, _ = evaluate("holdout", model, d, d.holdout, snaps, batcher, args, device, max_snaps)
+            rec["holdout"] = asdict(hold_m)
         state["history"].append(rec)
         logger.info("epoch %d  train_bce=%.4f  cl=%.4f  %s  (%.0fs)", epoch, rec["train_bce"],
                     rec["train_cl"], val_m, rec["seconds"])
@@ -626,7 +658,7 @@ def run(args) -> None:
     if getattr(model, "fusion", "concat") == "sparse":
         sample = np.sort(np.random.default_rng(0).choice(
             d.val_rows, size=min(VAL_CODE_SAMPLE, len(d.val_rows)), replace=False))
-        fstats = FusionStats(model.head.m_sh, sample)
+        fstats = FusionStats(model.head.m_sh, sample, model.head.m_pr)
     val_m, val_p = evaluate("val", model, d, d.val_rows, snaps, batcher, args, device, max_snaps,
                             fstats)
     np.savez(run_dir / "val_preds.npz", **val_p)

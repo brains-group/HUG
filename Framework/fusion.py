@@ -17,6 +17,8 @@ Dataset-agnostic: evidence comes precomputed from features.view_evidence.
 
 from __future__ import annotations
 
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -43,6 +45,25 @@ def info_nce(z1: Tensor, z2: Tensor, temperature: float) -> Tensor:
     z1, z2 = F.normalize(z1, dim=-1), F.normalize(z2, dim=-1)
     logits = z1 @ z2.t() / temperature
     return F.cross_entropy(logits, torch.arange(len(z1), device=z1.device))
+
+
+ALIGN_ROWS = 1024      # spec 05b §1: InfoNCE over a random subset of the batch
+
+
+def align_loss(z1: Tensor, z2: Tensor, temperature: float, rows: int = ALIGN_ROWS) -> Tensor:
+    """InfoNCE over ≤ `rows` random rows of the batch, divided by log(n): chance = 1.0."""
+    n = len(z1)
+    if n < 2:
+        return _zero(z1)
+    if n > rows:
+        idx = torch.randperm(n, device=z1.device)[:rows]
+        z1, z2, n = z1[idx], z2[idx], rows
+    return info_nce(z1, z2, temperature) / math.log(n)
+
+
+def rec_loss(target: Tensor, recon: Tensor) -> Tensor:
+    """Squared error, mean over dimensions and rows (≈ 1 per view at init)."""
+    return (target - recon).pow(2).mean(-1).mean()
 
 
 def cross_cov_penalty(a: Tensor, b: Tensor) -> Tensor:
@@ -176,29 +197,31 @@ class MISAFusion(_Projected):
     """
 
     def __init__(self, g_dim, s_dim, ctx_dim, fdim, dropout, hdim: int = 128,
-                 w_rec: float = 1.0, w_align: float = 0.1, w_dec: float = 0.1,
-                 temperature: float = 0.2) -> None:
+                 w_rec: float = 0.1, w_align: float = 0.3, w_dec: float = 0.1,
+                 temperature: float = 0.2, dense_skip: bool = False) -> None:
         super().__init__(g_dim, s_dim, fdim)
         self.shared = nn.Sequential(nn.Linear(fdim, hdim), nn.ReLU())
         self.private = nn.ModuleDict({v: nn.Sequential(nn.Linear(fdim, hdim), nn.ReLU())
                                       for v in ("G", "S")})
         self.decode = nn.ModuleDict({v: nn.Linear(2 * hdim, fdim) for v in ("G", "S")})
-        self.head = nn.Sequential(*mlp_head(3 * hdim + ctx_dim, dropout))
+        self.dense_skip = dense_skip
+        self.head = nn.Sequential(*mlp_head(3 * hdim + ctx_dim + (2 * fdim if dense_skip else 0),
+                                            dropout))
         self.w_rec, self.w_align, self.w_dec, self.temperature = w_rec, w_align, w_dec, temperature
 
     def fuse(self, e_G, e_S, ctx, evidence) -> dict:
         p = dict(zip(("G", "S"), self.project(e_G, e_S)))
         sh = {v: self.shared(p[v]) for v in p}
         pr = {v: self.private[v](p[v]) for v in p}
-        z = torch.cat([0.5 * (sh["G"] + sh["S"]), pr["G"], pr["S"], ctx], dim=-1)
+        skip = [p["G"], p["S"]] if self.dense_skip else []
+        z = torch.cat(skip + [0.5 * (sh["G"] + sh["S"]), pr["G"], pr["S"], ctx], dim=-1)
         logit = self.head(z).squeeze(-1)
         aux = _zero(logit)
         if self.w_rec:
             aux = aux + self.w_rec * sum(
-                (p[v].detach() - self.decode[v](torch.cat([sh[v], pr[v]], -1))).pow(2).sum(-1).mean()
-                for v in p)
+                rec_loss(p[v].detach(), self.decode[v](torch.cat([sh[v], pr[v]], -1))) for v in p)
         if self.w_align:
-            aux = aux + self.w_align * info_nce(sh["G"], sh["S"], self.temperature)
+            aux = aux + self.w_align * align_loss(sh["G"], sh["S"], self.temperature)
         if self.w_dec:   # orthogonality ‖H_shᵀ H_pr‖_F² per view (normalised by size)
             aux = aux + self.w_dec * sum(
                 (sh[v].t() @ pr[v]).pow(2).sum() / (len(sh[v]) ** 2 * sh[v].shape[1]) for v in p)
@@ -209,9 +232,10 @@ class MISAFusion(_Projected):
 
 class SparseSPFusion(_EvidenceNorm, _Projected):
     """
-    Shared + view-private sparse codes over unit-norm dictionaries (spec 05 B).
+    Shared + view-private sparse codes over unit-norm dictionaries (spec 05 B, 05b).
 
-    a_v = ReLU(E_v p_v + b_v) split into a_v^sh (m_shared) and a_v^pr (m_private).
+    a_v^sh = ReLU(E_sh p_v + b_sh) with ONE shared encoder for both views (so shared atom j
+    means the same thing in both); a_v^pr = ReLU(E_v p_v + b_v) per view.
     Top-k: k_sh fixed; k_pr,v = k_min + round((k_max − k_min)·clip(n_v / n_ref,v, 0, 1))
     (or a fixed k).  Head on [½(a_G^sh + a_S^sh) ‖ a_G^pr ‖ a_S^pr ‖ ctx].
     """
@@ -219,10 +243,11 @@ class SparseSPFusion(_EvidenceNorm, _Projected):
     def __init__(self, g_dim, s_dim, ctx_dim, fdim, dropout, m_shared: int = 256,
                  m_private: int = 256, k_shared: int = 16, k_private_min: int = 4,
                  k_private_max: int = 48, k_schedule: str = "adaptive", k_private_fixed: int = 24,
-                 w_rec: float = 1.0, w_align: float = 0.1, w_dec: float = 0.1,
-                 temperature: float = 0.2) -> None:
+                 w_rec: float = 0.1, w_align: float = 0.3, w_dec: float = 0.1,
+                 temperature: float = 0.2, dense_skip: bool = False) -> None:
         super().__init__(g_dim, s_dim, fdim)
         self.m_sh, self.m_pr = m_shared, m_private
+        self.fdim, self.dense_skip = fdim, dense_skip
         self.k_sh, self.k_min, self.k_max = k_shared, k_private_min, k_private_max
         self.k_schedule, self.k_fixed = k_schedule, k_private_fixed
         self.w_rec, self.w_align, self.w_dec, self.temperature = w_rec, w_align, w_dec, temperature
@@ -231,8 +256,12 @@ class SparseSPFusion(_EvidenceNorm, _Projected):
             return nn.Parameter(F.normalize(torch.randn(m, fdim), dim=-1))
         self.D_sh = unit(m_shared)
         self.D_pr = nn.ParameterDict({"G": unit(m_private), "S": unit(m_private)})
-        self.enc = nn.ModuleDict({v: nn.Linear(fdim, m_shared + m_private) for v in ("G", "S")})
-        self.head = nn.Sequential(*mlp_head(m_shared + 2 * m_private + ctx_dim, dropout))
+        self.enc_sh = nn.Linear(fdim, m_shared)
+        self.enc_pr = nn.ModuleDict({v: nn.Linear(fdim, m_private) for v in ("G", "S")})
+        self.head = nn.Sequential(*mlp_head(
+            m_shared + 2 * m_private + ctx_dim + (2 * fdim if dense_skip else 0), dropout))
+        # dead-atom window in steps (set by the trainer from one epoch's worth of rows)
+        self.dead_after = 10_000
         # n_ref per view: 95th percentile of n_v over training rows (set by the trainer)
         self._init_n_ref()
         # firing bookkeeping for dead-atom resampling (steps since last fired)
@@ -263,15 +292,16 @@ class SparseSPFusion(_EvidenceNorm, _Projected):
         kp = self.k_private(evidence)
         sh, pr = {}, {}
         for i, v in enumerate(("G", "S")):
-            a = F.relu(self.enc[v](p[v]))
-            sh[v] = self.topk_mask(a[:, :self.m_sh], self.k_sh)
-            pr[v] = self.topk_mask(a[:, self.m_sh:], kp[:, i])
+            sh[v] = self.topk_mask(F.relu(self.enc_sh(p[v])), self.k_sh)
+            pr[v] = self.topk_mask(F.relu(self.enc_pr[v](p[v])), kp[:, i])
         return sh, pr
 
     def fuse(self, e_G, e_S, ctx, evidence) -> dict:
         p = dict(zip(("G", "S"), self.project(e_G, e_S)))
         sh, pr = self.codes(p, evidence)
-        z = torch.cat([0.5 * (sh["G"] + sh["S"]), pr["G"], pr["S"], ctx], dim=-1)
+        kp = self.k_private(evidence)
+        skip = [p["G"], p["S"]] if self.dense_skip else []
+        z = torch.cat(skip + [0.5 * (sh["G"] + sh["S"]), pr["G"], pr["S"], ctx], dim=-1)
         logit = self.head(z).squeeze(-1)
 
         aux = _zero(logit)
@@ -282,11 +312,11 @@ class SparseSPFusion(_EvidenceNorm, _Projected):
         rec_err = {}
         for v in ("G", "S"):
             recon = sh_d[v] @ self.D_sh + pr_d[v] @ self.D_pr[v]
-            rec_err[v] = (pd_[v] - recon).pow(2).sum(-1)
+            rec_err[v] = (pd_[v] - recon).pow(2).mean(-1)          # mean over dimensions
         if self.w_rec:
             aux = aux + self.w_rec * sum(e.mean() for e in rec_err.values())
         if self.w_align:
-            aux = aux + self.w_align * info_nce(sh["G"], sh["S"], self.temperature)
+            aux = aux + self.w_align * align_loss(sh["G"], sh["S"], self.temperature)
         if self.w_dec:
             aux = aux + self.w_dec * cross_cov_penalty(pr["G"], pr["S"])
 
@@ -294,7 +324,8 @@ class SparseSPFusion(_EvidenceNorm, _Projected):
         rho = (l1(sh["G"]) + l1(sh["S"])) / (l1(sh["G"]) + l1(sh["S"]) + l1(pr["G"]) + l1(pr["S"])).clamp_min(1e-12)
         stats = {"rho": rho.detach(),
                  "active_sh_G": (sh["G"] > 0).sum(-1).detach(), "active_sh_S": (sh["S"] > 0).sum(-1).detach(),
-                 "active_pr_G": (pr["G"] > 0).sum(-1).detach(), "active_pr_S": (pr["S"] > 0).sum(-1).detach()}
+                 "active_pr_G": (pr["G"] > 0).sum(-1).detach(), "active_pr_S": (pr["S"] > 0).sum(-1).detach(),
+                 "k_pr_G": kp[:, 0].detach(), "k_pr_S": kp[:, 1].detach()}
         self._last = {"p": {v: p[v].detach() for v in p}, "rec_err": {v: rec_err[v].detach() for v in p},
                       "fired": {"sh": ((sh["G"] > 0) | (sh["S"] > 0)).any(0),
                                 "G": (pr["G"] > 0).any(0), "S": (pr["S"] > 0).any(0)},
@@ -310,14 +341,16 @@ class SparseSPFusion(_EvidenceNorm, _Projected):
             D.data = F.normalize(D.data, dim=-1)
 
     @torch.no_grad()
-    def track_and_resample(self, step: int, every: int = 1000, dead_after: int = 10_000,
+    def track_and_resample(self, step: int, every: int = 100, dead_after: int | None = None,
                            optimizer: torch.optim.Optimizer | None = None) -> dict:
         """
         Update steps-since-fired per atom; every `every` steps re-initialise atoms idle for
-        `dead_after` steps towards the residual of a random high-reconstruction-error row
-        (encoder row reset to match, and the optimiser's moments for those rows zeroed).
-        Returns dead fractions per dictionary.
+        `dead_after` steps (default self.dead_after: one epoch's worth of training rows, spec
+        05b §4) towards the residual of a random high-reconstruction-error row (encoder row
+        reset to match, and the optimiser's moments for those rows zeroed).  Checks start
+        once `dead_after` steps have run.  Returns dead fractions per dictionary.
         """
+        dead_after = self.dead_after if dead_after is None else dead_after
         if not self._last:
             return {}
         fired = self._last["fired"]
@@ -327,7 +360,7 @@ class SparseSPFusion(_EvidenceNorm, _Projected):
             idle[fired[key]] = 0
         dead = {k: float((getattr(self, n) >= dead_after).float().mean())
                 for k, n in (("shared", "idle_sh"), ("G", "idle_G"), ("S", "idle_S"))}
-        if step % every == 0:
+        if step % every == 0 and step >= dead_after:
             self.resample_dead(dead_after, optimizer)
         return dead
 
@@ -355,12 +388,11 @@ class SparseSPFusion(_EvidenceNorm, _Projected):
                     D = self.D_sh if block == "sh" else self.D_pr[v]
                     D.data[atom] = target
                     reset_state(D, atom)
-                    offset = 0 if block == "sh" else self.m_sh
-                    for vv in (("G", "S") if block == "sh" else (v,)):
-                        self.enc[vv].weight.data[offset + atom] = target * 0.1
-                        self.enc[vv].bias.data[offset + atom] = 0.0
-                        reset_state(self.enc[vv].weight, offset + atom)
-                        reset_state(self.enc[vv].bias, offset + atom)
+                    enc = self.enc_sh if block == "sh" else self.enc_pr[v]
+                    enc.weight.data[atom] = target * 0.1
+                    enc.bias.data[atom] = 0.0
+                    reset_state(enc.weight, atom)
+                    reset_state(enc.bias, atom)
                     idle[atom] = 0
                     n += 1
         return n
@@ -382,11 +414,13 @@ def build_fusion(name: str, g_dim: int | None, s_dim: int | None, ctx_dim: int, 
         return MoEFusion(g_dim, s_dim, ctx_dim, fd, args.dropout, experts=args.moe_experts)
     if name == "misa":
         return MISAFusion(g_dim, s_dim, ctx_dim, fd, args.dropout, w_rec=args.w_rec,
-                          w_align=args.w_align, w_dec=args.w_dec)
+                          w_align=args.w_align, w_dec=args.w_dec,
+                          dense_skip=getattr(args, "fusion_dense_skip", False))
     if name == "sparse":
         return SparseSPFusion(g_dim, s_dim, ctx_dim, fd, args.dropout, m_shared=args.m_shared,
                               m_private=args.m_private, k_shared=args.k_shared,
                               k_private_min=args.k_private_min, k_private_max=args.k_private_max,
                               k_schedule=args.k_schedule, k_private_fixed=args.k_private_fixed,
-                              w_rec=args.w_rec, w_align=args.w_align, w_dec=args.w_dec)
+                              w_rec=args.w_rec, w_align=args.w_align, w_dec=args.w_dec,
+                              dense_skip=getattr(args, "fusion_dense_skip", False))
     raise ValueError(f"unknown fusion {name!r}; choose from {FUSIONS}")
