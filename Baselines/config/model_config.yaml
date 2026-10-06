@@ -153,3 +153,233 @@ DCNv2_kuairand_1k:
     seed: 2024
     monitor: AUC
     monitor_mode: max
+
+# ── mind (spec 06): the KuaiRand model settings on mind's dataset ids ──
+TransAct_mind:
+    model: TransAct
+    dataset_id: mind_seq
+    loss: binary_crossentropy
+    metrics: [logloss, AUC]
+    task: binary_classification
+    optimizer: adam
+    learning_rate: 1.0e-3
+    embedding_regularizer: 1.0e-6
+    net_regularizer: 0
+    batch_size: 4096
+    embedding_dim: 64
+    hidden_activations: relu
+    dcn_cross_layers: 3
+    dcn_hidden_units: [512, 256, 128]
+    mlp_hidden_units: []
+    num_heads: 2
+    transformer_layers: 1
+    transformer_dropout: 0.1
+    dim_feedforward: 256
+    net_dropout: 0.1
+    target_item_field: video_id
+    sequence_item_field: hist_video_ids
+    first_k_cols: 1
+    use_time_window_mask: False
+    time_window_ms: 86400000
+    concat_max_pool: True
+    batch_norm: False
+    epochs: 20
+    shuffle: True
+    seed: 2024
+    monitor: AUC
+    monitor_mode: max
+
+WuKong_mind:
+    model: WuKong
+    dataset_id: mind
+    loss: binary_crossentropy
+    metrics: [logloss, AUC]
+    task: binary_classification
+    optimizer: adam
+    learning_rate: 1.0e-3
+    embedding_regularizer: 1.0e-6
+    net_regularizer: 0
+    batch_size: 4096
+    embedding_dim: 64
+    num_wukong_layers: 3
+    lcb_features: 16
+    fmb_features: 16
+    fmb_mlp_units: [256, 128]
+    fmb_mlp_activations: relu
+    fmp_rank_k: 8
+    mlp_hidden_units: [256, 128]
+    mlp_hidden_activations: relu
+    mlp_batch_norm: True
+    layer_norm: True
+    net_dropout: 0.1
+    epochs: 20
+    shuffle: True
+    seed: 2024
+    monitor: AUC
+    monitor_mode: max
+
+FiGNN_mind:
+    model: FiGNN
+    dataset_id: mind_noseq
+    loss: binary_crossentropy
+    metrics: [logloss, AUC]
+    task: binary_classification
+    optimizer: adam
+    learning_rate: 1.0e-3
+    embedding_regularizer: 1.0e-6
+    net_regularizer: 0
+    batch_size: 4096
+    embedding_dim: 64
+    gnn_layers: 3
+    use_residual: True
+    use_gru: True
+    reuse_graph_layer: False
+    epochs: 20
+    shuffle: True
+    seed: 2024
+    monitor: AUC
+    monitor_mode: max
+
+DCNv2_mind:
+    model: DCNv2
+    dataset_id: mind_noseq
+    loss: binary_crossentropy
+    metrics: [logloss, AUC]
+    task: binary_classification
+    optimizer: adam
+    model_structure: parallel
+    use_low_rank_mixture: False
+    low_rank: 32
+    num_experts: 4
+    learning_rate: 1.0e-3
+    embedding_regularizer: 1.0e-6
+    net_regularizer: 0
+    batch_size: 4096
+    embedding_dim: 64
+    stacked_dnn_hidden_units: [512, 256, 128]
+    parallel_dnn_hidden_units: [512, 256, 128]
+    dnn_activations: relu
+    num_cross_layers: 3
+    net_dropout: 0.1
+    batch_norm: False
+    epochs: 20
+    shuffle: True
+    seed: 2024
+    monitor: AUC
+    monitor_mode: max
+
+
+# ── zhihurec (spec 06): the KuaiRand model settings on zhihurec's dataset ids ──
+TransAct_zhihurec:
+    model: TransAct
+    dataset_id: zhihurec_seq
+    loss: binary_crossentropy
+    metrics: [logloss, AUC]
+    task: binary_classification
+    optimizer: adam
+    learning_rate: 1.0e-3
+    embedding_regularizer: 1.0e-6
+    net_regularizer: 0
+    batch_size: 4096
+    embedding_dim: 64
+    hidden_activations: relu
+    dcn_cross_layers: 3
+    dcn_hidden_units: [512, 256, 128]
+    mlp_hidden_units: []
+    num_heads: 2
+    transformer_layers: 1
+    transformer_dropout: 0.1
+    dim_feedforward: 256
+    net_dropout: 0.1
+    target_item_field: video_id
+    sequence_item_field: hist_video_ids
+    first_k_cols: 1
+    use_time_window_mask: False
+    time_window_ms: 86400000
+    concat_max_pool: True
+    batch_norm: False
+    epochs: 20
+    shuffle: True
+    seed: 2024
+    monitor: AUC
+    monitor_mode: max
+
+WuKong_zhihurec:
+    model: WuKong
+    dataset_id: zhihurec
+    loss: binary_crossentropy
+    metrics: [logloss, AUC]
+    task: binary_classification
+    optimizer: adam
+    learning_rate: 1.0e-3
+    embedding_regularizer: 1.0e-6
+    net_regularizer: 0
+    batch_size: 4096
+    embedding_dim: 64
+    num_wukong_layers: 3
+    lcb_features: 16
+    fmb_features: 16
+    fmb_mlp_units: [256, 128]
+    fmb_mlp_activations: relu
+    fmp_rank_k: 8
+    mlp_hidden_units: [256, 128]
+    mlp_hidden_activations: relu
+    mlp_batch_norm: True
+    layer_norm: True
+    net_dropout: 0.1
+    epochs: 20
+    shuffle: True
+    seed: 2024
+    monitor: AUC
+    monitor_mode: max
+
+FiGNN_zhihurec:
+    model: FiGNN
+    dataset_id: zhihurec_noseq
+    loss: binary_crossentropy
+    metrics: [logloss, AUC]
+    task: binary_classification
+    optimizer: adam
+    learning_rate: 1.0e-3
+    embedding_regularizer: 1.0e-6
+    net_regularizer: 0
+    batch_size: 4096
+    embedding_dim: 64
+    gnn_layers: 3
+    use_residual: True
+    use_gru: True
+    reuse_graph_layer: False
+    epochs: 20
+    shuffle: True
+    seed: 2024
+    monitor: AUC
+    monitor_mode: max
+
+DCNv2_zhihurec:
+    model: DCNv2
+    dataset_id: zhihurec_noseq
+    loss: binary_crossentropy
+    metrics: [logloss, AUC]
+    task: binary_classification
+    optimizer: adam
+    model_structure: parallel
+    use_low_rank_mixture: False
+    low_rank: 32
+    num_experts: 4
+    learning_rate: 1.0e-3
+    embedding_regularizer: 1.0e-6
+    net_regularizer: 0
+    batch_size: 4096
+    embedding_dim: 64
+    stacked_dnn_hidden_units: [512, 256, 128]
+    parallel_dnn_hidden_units: [512, 256, 128]
+    dnn_activations: relu
+    num_cross_layers: 3
+    net_dropout: 0.1
+    batch_norm: False
+    epochs: 20
+    shuffle: True
+    seed: 2024
+    monitor: AUC
+    monitor_mode: max
+

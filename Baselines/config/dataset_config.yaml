@@ -86,3 +86,133 @@ kuairand_1k_noseq:
         - {name: [tab, hour], active: True, dtype: str, type: categorical}
 
     label_col: {name: is_click, dtype: float}
+
+# ─────────────────────────────────────────────────────────────
+# MIND (MINDlarge train+dev, 20% users) (spec 06): CSVs from preprocess.py --dataset mind
+# (same layout as KuaiRand: user_id / video_id = item / is_click / hist_video_ids,
+# integer node ids). Label-timed histories and statistics come from the adapter.
+# ─────────────────────────────────────────────────────────────
+mind_seq:
+    data_root: /home/dasgua3/HUG/Baselines/data/processed/
+    data_format: csv
+    train_data: /home/dasgua3/HUG/Baselines/data/processed/mind_csv/train.csv
+    valid_data: /home/dasgua3/HUG/Baselines/data/processed/mind_csv/valid.csv
+    test_data: /home/dasgua3/HUG/Baselines/data/processed/mind_csv/test.csv
+    min_categr_count: 2        # overridden per tuning trial (dataset id gets a _m<count> suffix)
+
+    feature_cols:
+        - {name: user_id, active: True, dtype: str, type: categorical}
+        - {name: video_id, active: True, dtype: str, type: categorical}
+        - {name: [category, subcategory], active: True, dtype: str, type: categorical}
+        - {name: [show_cnt_log, click_cnt_log, ctr_known], active: True, dtype: float, type: numeric, normalizer: StandardScaler}
+        - {name: [hour, dow], active: True, dtype: str, type: categorical}
+        - {name: hist_video_ids, active: True, dtype: str, type: sequence,
+           splitter: " ", max_len: 50, padding: pre,
+           feature_encoder: null,     # TransAct attends over the raw sequence
+           share_embedding: video_id}
+
+    label_col: {name: is_click, dtype: float}
+
+mind:
+    data_root: /home/dasgua3/HUG/Baselines/data/processed/
+    data_format: csv
+    train_data: /home/dasgua3/HUG/Baselines/data/processed/mind_csv/train.csv
+    valid_data: /home/dasgua3/HUG/Baselines/data/processed/mind_csv/valid.csv
+    test_data: /home/dasgua3/HUG/Baselines/data/processed/mind_csv/test.csv
+    min_categr_count: 2        # overridden per tuning trial (dataset id gets a _m<count> suffix)
+
+    feature_cols:
+        - {name: user_id, active: True, dtype: str, type: categorical}
+        - {name: video_id, active: True, dtype: str, type: categorical}
+        - {name: [category, subcategory], active: True, dtype: str, type: categorical}
+        - {name: [show_cnt_log, click_cnt_log, ctr_known], active: True, dtype: float, type: numeric, normalizer: StandardScaler}
+        - {name: [hour, dow], active: True, dtype: str, type: categorical}
+        - {name: hist_video_ids, active: True, dtype: str, type: sequence,
+           splitter: " ", max_len: 50, padding: pre,
+           share_embedding: video_id}
+
+    label_col: {name: is_click, dtype: float}
+
+mind_noseq:
+    data_root: /home/dasgua3/HUG/Baselines/data/processed/
+    data_format: csv
+    train_data: /home/dasgua3/HUG/Baselines/data/processed/mind_csv/train.csv
+    valid_data: /home/dasgua3/HUG/Baselines/data/processed/mind_csv/valid.csv
+    test_data: /home/dasgua3/HUG/Baselines/data/processed/mind_csv/test.csv
+    min_categr_count: 2        # overridden per tuning trial (dataset id gets a _m<count> suffix)
+
+    feature_cols:
+        - {name: user_id, active: True, dtype: str, type: categorical}
+        - {name: video_id, active: True, dtype: str, type: categorical}
+        - {name: [category, subcategory], active: True, dtype: str, type: categorical}
+        - {name: [show_cnt_log, click_cnt_log, ctr_known], active: True, dtype: float, type: numeric, normalizer: StandardScaler}
+        - {name: [hour, dow], active: True, dtype: str, type: categorical}
+
+    label_col: {name: is_click, dtype: float}
+
+
+# ─────────────────────────────────────────────────────────────
+# ZhihuRec-100M (12.5% users) (spec 06): CSVs from preprocess.py --dataset zhihurec
+# (same layout as KuaiRand: user_id / video_id = item / is_click / hist_video_ids,
+# integer node ids). Label-timed histories and statistics come from the adapter.
+# ─────────────────────────────────────────────────────────────
+zhihurec_seq:
+    data_root: /home/dasgua3/HUG/Baselines/data/processed/
+    data_format: csv
+    train_data: /home/dasgua3/HUG/Baselines/data/processed/zhihurec_csv/train.csv
+    valid_data: /home/dasgua3/HUG/Baselines/data/processed/zhihurec_csv/valid.csv
+    test_data: /home/dasgua3/HUG/Baselines/data/processed/zhihurec_csv/test.csv
+    min_categr_count: 2        # overridden per tuning trial (dataset id gets a _m<count> suffix)
+
+    feature_cols:
+        - {name: user_id, active: True, dtype: str, type: categorical}
+        - {name: [gender, login_freq, register_type, register_platform, platform, device_model, device_brand, province, city, from_android, from_iphone, from_ipad, from_pc, from_mobile_web], active: True, dtype: str, type: categorical}
+        - {name: video_id, active: True, dtype: str, type: categorical}
+        - {name: [anonymous, high_value, editor_rec, has_pic, has_video, excellent_author, excellent_answerer, author_id, question_id], active: True, dtype: str, type: categorical}
+        - {name: [show_cnt_log, click_cnt_log, ctr_known, account_age_log, account_age_unknown, answer_age_log, answer_age_unknown], active: True, dtype: float, type: numeric, normalizer: StandardScaler}
+        - {name: [hour, dow], active: True, dtype: str, type: categorical}
+        - {name: hist_video_ids, active: True, dtype: str, type: sequence,
+           splitter: " ", max_len: 50, padding: pre,
+           feature_encoder: null,     # TransAct attends over the raw sequence
+           share_embedding: video_id}
+
+    label_col: {name: is_click, dtype: float}
+
+zhihurec:
+    data_root: /home/dasgua3/HUG/Baselines/data/processed/
+    data_format: csv
+    train_data: /home/dasgua3/HUG/Baselines/data/processed/zhihurec_csv/train.csv
+    valid_data: /home/dasgua3/HUG/Baselines/data/processed/zhihurec_csv/valid.csv
+    test_data: /home/dasgua3/HUG/Baselines/data/processed/zhihurec_csv/test.csv
+    min_categr_count: 2        # overridden per tuning trial (dataset id gets a _m<count> suffix)
+
+    feature_cols:
+        - {name: user_id, active: True, dtype: str, type: categorical}
+        - {name: [gender, login_freq, register_type, register_platform, platform, device_model, device_brand, province, city, from_android, from_iphone, from_ipad, from_pc, from_mobile_web], active: True, dtype: str, type: categorical}
+        - {name: video_id, active: True, dtype: str, type: categorical}
+        - {name: [anonymous, high_value, editor_rec, has_pic, has_video, excellent_author, excellent_answerer, author_id, question_id], active: True, dtype: str, type: categorical}
+        - {name: [show_cnt_log, click_cnt_log, ctr_known, account_age_log, account_age_unknown, answer_age_log, answer_age_unknown], active: True, dtype: float, type: numeric, normalizer: StandardScaler}
+        - {name: [hour, dow], active: True, dtype: str, type: categorical}
+        - {name: hist_video_ids, active: True, dtype: str, type: sequence,
+           splitter: " ", max_len: 50, padding: pre,
+           share_embedding: video_id}
+
+    label_col: {name: is_click, dtype: float}
+
+zhihurec_noseq:
+    data_root: /home/dasgua3/HUG/Baselines/data/processed/
+    data_format: csv
+    train_data: /home/dasgua3/HUG/Baselines/data/processed/zhihurec_csv/train.csv
+    valid_data: /home/dasgua3/HUG/Baselines/data/processed/zhihurec_csv/valid.csv
+    test_data: /home/dasgua3/HUG/Baselines/data/processed/zhihurec_csv/test.csv
+    min_categr_count: 2        # overridden per tuning trial (dataset id gets a _m<count> suffix)
+
+    feature_cols:
+        - {name: user_id, active: True, dtype: str, type: categorical}
+        - {name: [gender, login_freq, register_type, register_platform, platform, device_model, device_brand, province, city, from_android, from_iphone, from_ipad, from_pc, from_mobile_web], active: True, dtype: str, type: categorical}
+        - {name: video_id, active: True, dtype: str, type: categorical}
+        - {name: [anonymous, high_value, editor_rec, has_pic, has_video, excellent_author, excellent_answerer, author_id, question_id], active: True, dtype: str, type: categorical}
+        - {name: [show_cnt_log, click_cnt_log, ctr_known, account_age_log, account_age_unknown, answer_age_log, answer_age_unknown], active: True, dtype: float, type: numeric, normalizer: StandardScaler}
+        - {name: [hour, dow], active: True, dtype: str, type: categorical}
+
+    label_col: {name: is_click, dtype: float}

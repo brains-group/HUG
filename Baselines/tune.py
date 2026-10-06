@@ -65,6 +65,7 @@ def main() -> None:
     p.add_argument("--max-steps", type=int, default=0)
     p.add_argument("--quiet", action="store_true")
     p.add_argument("--config-hash", default=None)
+    p.add_argument("--dataset", default="kuairand")
     args, _ = p.parse_known_args()
 
     out = Path(args.out)
@@ -78,7 +79,7 @@ def main() -> None:
         if not metrics.exists():
             cmd = [sys.executable, str(ROOT / "train.py"), "--model", args.model,
                    "--run-dir", str(tdir), "--gpu", str(args.gpu), "--seed", "2024",
-                   "--params", str(tdir / "params.yaml"), "--quiet"]
+                   "--params", str(tdir / "params.yaml"), "--dataset", args.dataset, "--quiet"]
             if args.max_steps:
                 cmd += ["--max-steps", str(args.max_steps)]
             print(f"[tune] {args.model} trial {i}: {trial}", flush=True)

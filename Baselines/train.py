@@ -47,19 +47,24 @@ import yaml
 ROOT         = Path(__file__).resolve().parent
 CONFIG_DIR   = ROOT / "config"
 FUXICTR_ROOT = Path(os.environ.get("FUXICTR_ROOT", ROOT / "FuxiCTR"))
-CSV_DIR      = ROOT / "data" / "processed" / "kuairand_1k_csv"
+CSV_DIRS     = {"kuairand": "kuairand_1k_csv", "mind": "mind_csv", "zhihurec": "zhihurec_csv"}
+CONFIG_SUFFIX = {"kuairand": "kuairand_1k", "mind": "mind", "zhihurec": "zhihurec"}
 sys.path.insert(0, str(ROOT.parent / "Framework"))
 
 from metrics import compute_metrics  # noqa: E402
 from runtime import environment_versions, git_state, is_quiet, set_determinism  # noqa: E402
 from test_guard import authorize_test_access  # noqa: E402
 
-MODELS = {
-    "TransAct": "TransAct_kuairand_1k",
-    "WuKong":   "WuKong_kuairand_1k",
-    "FiGNN":    "FiGNN_kuairand_1k",
-    "DCNv2":    "DCNv2_kuairand_1k",
-}
+MODELS = ("TransAct", "WuKong", "FiGNN", "DCNv2")
+
+
+def model_config_id(model: str, dataset: str = "kuairand") -> str:
+    """model_config.yaml entry: <model>_<kuairand_1k|mind|zhihurec>."""
+    return f"{model}_{CONFIG_SUFFIX[dataset]}"
+
+
+def csv_dir(dataset: str = "kuairand") -> Path:
+    return ROOT / "data" / "processed" / CSV_DIRS[dataset]
 BUCKETS = {"video_train_count": "bucket_video_train_count", "coldwarm": "bucket_coldwarm",
            "history_len": "bucket_history_len"}
 DRY_RUN_EVAL_BATCHES = 20
@@ -166,7 +171,8 @@ def run(args) -> dict:
     from fuxictr.utils import load_config, print_to_json, set_logger
 
     src = _import_model_zoo(args.model)
-    params = load_config(str(CONFIG_DIR), MODELS[args.model])
+    params = load_config(str(CONFIG_DIR), model_config_id(args.model, args.dataset))
+    CSV_DIR = csv_dir(args.dataset)
     overrides = yaml.safe_load(Path(args.params).read_text()) if args.params else {}
     params.update(overrides or {})
     # dataset_config.yaml paths are relative to Baselines/ (the repo can live anywhere)
@@ -268,6 +274,7 @@ def run(args) -> dict:
 def parse_args(argv=None):
     p = argparse.ArgumentParser()
     p.add_argument("--model", required=True, choices=list(MODELS))
+    p.add_argument("--dataset", default="kuairand", choices=list(CSV_DIRS))
     p.add_argument("--gpu", type=int, default=0, help="GPU index, -1 for CPU")
     p.add_argument("--seed", type=int, default=2024)
     p.add_argument("--run-dir", required=True)
