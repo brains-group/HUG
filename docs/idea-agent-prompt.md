@@ -18,8 +18,9 @@ particular, leave the vLLM server on the other A100 alone.
 - GitHub moved the repo to `git@github.com:brains-group/HUG.git`. The old `GCIC` URL still
   redirects, but run `git remote set-url origin git@github.com:brains-group/HUG.git` anyway.
 - Once it's clean: `git fetch origin && git checkout docs/technical-report-and-revision-plan
-  && git pull --ff-only`. The commit must be `84a01df` or later. Report the hash.
-- Later you'll switch to the Spec 06 branch (`spec06-datasets`) when told it's pushed.
+  && git pull --ff-only`. The commit must be `0155b4d` or later. Report the hash. Spec 06
+  (the MIND/ZhihuRec adapters) is already merged into this branch, so you don't need any other
+  branch.
 - For context, read `docs/specs/04-heavy-run-readiness.md`, `05-sparse-fusion.md`,
   `06-datasets.md` and `docs/HEAVY_RUN.md`. Spec 06 is the one that matters for you.
 
@@ -93,11 +94,21 @@ d. Report back: the commit hash; the env path; the checksum result; the pytest s
    `runs/port/N4/final_metrics.json` → `history`); and `nvidia-smi` at peak. The seconds per
    epoch sets the ZhihuRec budget.
 
-**5. ZhihuRec (when told Spec 06 is pushed).** `git fetch && git checkout spec06-datasets` (or
-whichever branch is named). Run the Spec 06 tests and its ZhihuRec smoke runs, then do a
-**dry run** of the queue restricted to ZhihuRec, for example `python scripts/run_queue.py
-experiments/heavy_run.yaml --gpus 0 --dry-run --only '<zhihurec job glob>'`; the exact job
-names come from Spec 06. Report the job list, the smoke results and a time estimate. **Don't
+**5. ZhihuRec smoke (right after the port check).** Read `docs/specs/06-datasets-results.md`
+first. Its GPU items are still pending, and you're running the ZhihuRec ones.
+- Build the bundle and the baseline CSVs: `Baselines/preprocess.py --dataset zhihurec`.
+- Run one HUG N4 epoch with `--dataset zhihurec`, and one 50-step smoke of each baseline on
+  ZhihuRec.
+- Do a **dry run** of the queue restricted to ZhihuRec:
+  `python scripts/run_queue.py experiments/heavy_run.yaml --gpus 0 --dry-run --max-steps 50
+  --only '*_zhihurec'`. Check the job list it selects. It must contain only `*_zhihurec` jobs.
+- Report the bundle's sizes and splits against the results doc (12,504,877 rows; quantile
+  fallback split), seconds per epoch, peak GPU memory, the dry-run outcome and a time
+  estimate for the 59 ZhihuRec jobs.
+
+You may also be asked to run the Spec 05b fusion probe (`docs/specs/05b-fusion-fixes.md`,
+§Probe) on KuaiRand here, when its code lands. Run it only when asked, and run one job at a
+time on this GPU. **Don't
 launch the real run until it's approved.**
 
 **6. Rules for the real run.**
