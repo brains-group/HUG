@@ -38,8 +38,13 @@ from data_loader import (
     LOG_STANDARD_EARLY, LOG_STANDARD_LATE, LOG_RANDOM,
     USER_FEATURES, VIDEO_BASIC, VIDEO_STATISTIC,
     SESSION_GAP_MS,
+    SPLIT_TRAIN, SPLIT_VAL, SPLIT_TEST,
+    assign_split, chronological_cutoffs, compute_video_statistics,
 )
-from hkg_constructor import HKGConstructor, HKGBundle
+from hkg_constructor import HKGConstructor, HKGBundle, snapshot_bundle, video_feature_matrix
+from temporal import (
+    PrefixBatcher, SnapshotStore, assign_snapshots, build_interactions, snapshot_boundaries,
+)
 from gnn_encoders import StructuralGNN, SequentialGNN
 from models import AlignmentModule, CVRHead, KuaiCVRModel
 
@@ -196,9 +201,19 @@ def loaded_data(tmp_data_dir) -> KuaiRandData:
 
 
 @pytest.fixture(scope="module")
-def hkg_bundle(loaded_data) -> HKGBundle:
-    constructor = HKGConstructor(loaded_data, device="cpu", max_seq_len=20)
-    return constructor.build()
+def cutoffs(loaded_data) -> tuple[int, int]:
+    return chronological_cutoffs(loaded_data.log_combined["time_ms"].values)
+
+
+@pytest.fixture(scope="module")
+def timed_bundle(loaded_data) -> HKGBundle:
+    return HKGConstructor(loaded_data, device="cpu").build()
+
+
+@pytest.fixture(scope="module")
+def hkg_bundle(timed_bundle, cutoffs) -> HKGBundle:
+    """Snapshot as of the validation cutoff — what training-period rows near t_val see."""
+    return snapshot_bundle(timed_bundle, cutoffs[0])
 
 
 # ── TestKuaiRandLoader ─────────────────────────────────────────────────────────
@@ -235,8 +250,9 @@ class TestKuaiRandLoader:
         assert vid_vals == list(range(len(vid_vals)))
 
     def test_global_cvr_in_stat(self, loaded_data):
-        assert "global_cvr" in loaded_data.video_statistic.columns
-        cvr = loaded_data.video_statistic["global_cvr"]
+        stats = compute_video_statistics(loaded_data.log_combined)
+        assert "global_cvr" in stats.columns
+        cvr = stats["global_cvr"]
         assert cvr.min() >= 0.0
         assert cvr.max() <= 1.0
 
@@ -313,6 +329,149 @@ class TestHKGConstructor:
     def test_node_counts_match_data(self, hkg_bundle, loaded_data):
         assert hkg_bundle.n_users  == len(loaded_data.user_id_map)
         assert hkg_bundle.n_videos == len(loaded_data.video_id_map)
+
+
+# ── TestCausality ──────────────────────────────────────────────────────────────
+
+def _edge_pairs(edge_index: torch.Tensor) -> set[tuple[int, int]]:
+    return set(map(tuple, edge_index.t().tolist()))
+
+
+@pytest.fixture(scope="module")
+def inter(loaded_data):
+    return build_interactions(loaded_data, max_prefix=5)
+
+
+@pytest.fixture(scope="module")
+def boundaries(inter):
+    return snapshot_boundaries(inter.time, inter.t_val, inter.t_test, period_hours=4)
+
+
+class TestCausality:
+    """Every input for an interaction at time t must come from interactions before t."""
+
+    def test_split_is_chronological(self, loaded_data, cutoffs):
+        t = loaded_data.log_combined["time_ms"].values
+        split = assign_split(t, *cutoffs)
+        assert t[split == SPLIT_TRAIN].max() < t[split == SPLIT_VAL].min()
+        assert t[split == SPLIT_VAL].max()   < t[split == SPLIT_TEST].min()
+
+    def test_interaction_split_matches_shared_cutoffs(self, inter, loaded_data):
+        assert (inter.t_val, inter.t_test) == chronological_cutoffs(inter.time)
+        assert np.all(np.diff(inter.time) >= 0)
+
+    def test_boundaries_include_split_cutoffs(self, boundaries, inter):
+        assert inter.t_val in boundaries and inter.t_test in boundaries
+
+    def test_snapshot_starts_before_row(self, inter, boundaries):
+        k = assign_snapshots(inter.time, boundaries)
+        assert np.all(boundaries[k] <= inter.time)
+        # no snapshot period mixes splits
+        for kk in np.unique(k):
+            assert len(np.unique(inter.split[k == kk])) == 1
+
+    def test_timed_edges_carry_time(self, timed_bundle):
+        g = timed_bundle.full_graph
+        for et in g.edge_types:
+            if et in [("video", "made_by", "author"), ("video", "tagged_as", "category")]:
+                continue
+            assert "edge_time" in g[et], et
+
+    def test_snapshot_edges_strictly_before_cutoff(self, timed_bundle, boundaries):
+        for b in boundaries:
+            view = snapshot_bundle(timed_bundle, int(b))
+            for g in (view.full_graph, view.structural_graph, view.sequential_graph):
+                for et in g.edge_types:
+                    if "edge_time" in g[et]:
+                        assert (g[et].edge_time < b).all(), (et, b)
+
+    def test_snapshot_pairs_from_past_only(self, timed_bundle, loaded_data, cutoffs):
+        b   = cutoffs[0]
+        log = loaded_data.log_combined
+        past = log[log["time_ms"] < b]
+        pairs = set(zip(past["user_id"].map(loaded_data.user_id_map).tolist(),
+                        past["video_id"].map(loaded_data.video_id_map).tolist()))
+        g = snapshot_bundle(timed_bundle, b).full_graph
+        for et in g.edge_types:
+            if et[0] == "user" and et[2] == "video":
+                assert _edge_pairs(g[et].edge_index) <= pairs, et
+
+    def test_store_video_features_from_past_only(self, timed_bundle, loaded_data, boundaries):
+        store = SnapshotStore(timed_bundle, loaded_data, boundaries,
+                              rel_builder=lambda v: (torch.zeros(2, 0, dtype=torch.long),
+                                                     torch.zeros(0, dtype=torch.long)))
+        vb = loaded_data.video_basic.sort_values("video_id")
+        log = loaded_data.log_combined
+        for k, b in enumerate(boundaries):
+            expected = video_feature_matrix(vb, compute_video_statistics(log[log["time_ms"] < b]))
+            assert np.allclose(store.video_x[k].numpy(), expected)
+        assert np.allclose(store.video_x[0].numpy()[:, 2:], 0.0)  # nothing before the first row
+
+    def test_session_prefix_is_strictly_earlier(self, inter, loaded_data):
+        sm = loaded_data.session_map
+        sm = sm[sm["user_id"].isin(loaded_data.user_id_map) & sm["video_id"].isin(loaded_data.video_id_map)]
+        sm = sm.sort_values("time_ms", kind="stable").reset_index(drop=True)
+        sess = sm["session_id"].values
+        batch = PrefixBatcher(inter)(np.arange(len(inter.time)))
+        prefix = batch["prefix_items"].numpy()
+        assert (prefix >= 0).any(axis=1).sum() > 0, "fixture has no non-empty prefixes"
+        for i in range(len(inter.time)):
+            earlier = np.flatnonzero((sess == sess[i]) & (inter.time < inter.time[i]))
+            earlier = earlier[np.argsort(inter.time[earlier], kind="stable")][-inter.max_prefix:]
+            got = prefix[i][prefix[i] >= 0]
+            assert sorted(got.tolist()) == sorted(inter.video[earlier].tolist()), i
+
+    def test_predictions_invariant_to_future(self, loaded_data, inter, boundaries):
+        """Rewrite everything at or after T; scores of rows before T must not move."""
+        import copy
+        import main as pipeline
+
+        T = int(np.quantile(inter.time, 0.6))
+
+        def scores(data):
+            it     = build_interactions(data, max_prefix=5)
+            bundle = HKGConstructor(data, device="cpu").build()
+            snaps  = assign_snapshots(it.time, boundaries)
+            store  = SnapshotStore(
+                bundle, data, boundaries,
+                rel_builder=lambda v: pipeline.build_relation_edge_index(
+                    v.structural_graph, torch.device("cpu"), 10**9))
+            batcher = PrefixBatcher(it)
+            out = np.empty(len(it.time))
+            model.eval()
+            with torch.no_grad():
+                for k in np.unique(snaps):
+                    rows = np.flatnonzero(snaps == k)
+                    emb  = pipeline.encode_snapshot(model, store, int(k), "dual")
+                    b    = batcher(rows)
+                    out[rows] = model.forward_from_embeddings(
+                        emb, b["user_idx"], b["video_idx"], b["prefix_items"])["proba"].numpy()
+            return out, it.time
+
+        torch.manual_seed(0)
+        model = pipeline.build_model(loaded_data, HKGConstructor(loaded_data).build(),
+                                     hidden_dim=16, out_dim=8, device=torch.device("cpu"),
+                                     num_layers=2)
+
+        base, t = scores(loaded_data)
+
+        future = copy.copy(loaded_data)
+        rng = np.random.default_rng(1)
+        for name in ("log_combined", "session_map"):
+            df = getattr(loaded_data, name).copy()
+            late = df["time_ms"].values >= T
+            for col in ["is_click", "is_like", "is_follow", "is_comment",
+                        "is_forward", "is_hate", "long_view"]:
+                df.loc[late, col] = 1 - df.loc[late, col]
+            df.loc[late, "video_id"] = rng.permutation(df.loc[late, "video_id"].values)
+            setattr(future, name, df)
+        perturbed, t2 = scores(future)
+
+        assert np.array_equal(t, t2)
+        early = t < T
+        assert early.any() and (~early).any()
+        np.testing.assert_array_equal(base[early], perturbed[early])
+        assert not np.allclose(base[~early], perturbed[~early])   # the test can see changes
 
 
 # ── TestStructuralGNN ──────────────────────────────────────────────────────────
@@ -741,9 +900,14 @@ class TestRealData:
         return loader.load()
 
     @pytest.fixture(scope="class")
-    def real_bundle(self, real_data, device) -> HKGBundle:
-        constructor = HKGConstructor(real_data, device=str(device), max_seq_len=50)
-        return constructor.build()
+    def real_cutoffs(self, real_data) -> tuple[int, int]:
+        return chronological_cutoffs(real_data.log_combined["time_ms"].values)
+
+    @pytest.fixture(scope="class")
+    def real_bundle(self, real_data, real_cutoffs) -> HKGBundle:
+        """Snapshot as of the validation cutoff."""
+        timed = HKGConstructor(real_data, device="cpu").build()
+        return snapshot_bundle(timed, real_cutoffs[0])
 
     # ── Phase 1: Data loading ──────────────────────────────────────────────────
 
@@ -780,9 +944,10 @@ class TestRealData:
         assert pr.min() >= 0.0, f"play_ratio min = {pr.min()}"
         assert pr.max() <= 1.0, f"play_ratio max = {pr.max()}"
 
-    def test_real_global_cvr_bounds(self, real_data):
+    def test_real_global_cvr_bounds(self, real_data, real_cutoffs):
         """Global CVR per video must be in [0, 1]."""
-        cvr = real_data.video_statistic["global_cvr"]
+        log = real_data.log_combined
+        cvr = compute_video_statistics(log[log["time_ms"] < real_cutoffs[0]])["global_cvr"]
         assert cvr.min() >= 0.0
         assert cvr.max() <= 1.0
 
@@ -1016,3 +1181,22 @@ class TestRealData:
         assert all(torch.isfinite(torch.tensor(g)) for g in grad_norms), (
             "Non-finite gradients found"
         )
+
+    def test_real_no_test_pair_in_graph(self, real_data, real_bundle, real_cutoffs):
+        """Sample 1000 test pairs never seen before the cutoff; none may be graph edges."""
+        log = real_data.log_combined
+        u = log["user_id"].map(real_data.user_id_map)
+        v = log["video_id"].map(real_data.video_id_map)
+        test = log["time_ms"].values >= real_cutoffs[1]
+        early = log["time_ms"].values < real_cutoffs[0]
+        pairs_early = set(zip(u[early].tolist(), v[early].tolist()))
+        test_pairs = [p for p in zip(u[test].tolist(), v[test].tolist())
+                      if p not in pairs_early]
+        rng = np.random.default_rng(0)
+        idx = rng.choice(len(test_pairs), size=min(1000, len(test_pairs)), replace=False)
+        sample = {test_pairs[i] for i in idx}
+        g = real_bundle.full_graph
+        for et in g.edge_types:
+            if et[0] == "user" and et[2] == "video":
+                ei = g[et].edge_index.cpu()
+                assert not (_edge_pairs(ei) & sample), et

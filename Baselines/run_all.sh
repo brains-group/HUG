@@ -1,53 +1,26 @@
 #!/usr/bin/env bash
-# run_all.sh  — end-to-end pipeline for DIN + BST on KuaiRand-1K
+# run_all.sh — end-to-end pipeline for the TransAct + WuKong baselines
 # ─────────────────────────────────────────────────────────────────
 # Usage:
-#   bash run_all.sh            # CPU, both models
-#   bash run_all.sh 0          # GPU 0, both models
-#   bash run_all.sh 0 DIN      # GPU 0, DIN only
+#   bash run_all.sh                  # GPU 0, both models
+#   bash run_all.sh 1                # GPU 1, both models
+#   bash run_all.sh 0 TransAct       # GPU 0, one model
+#   DATA_DIR=/path/to/KuaiRand-1K/data bash run_all.sh
 # ─────────────────────────────────────────────────────────────────
-
-export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
-GPU=${1:--1}
-MODEL=${2:-both}
-
 set -euo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")"
 
-echo ""
-echo "========================================================"
-echo "  KuaiRand-1K  |  DIN + BST  |  FuxiCTR pipeline"
-echo "========================================================"
-echo ""
+GPU=${1:-0}
+MODEL=${2:-all}
+DATA_DIR=${DATA_DIR:-../KuaiRand-1K/data}
 
-# 0. Clone FuxiCTR if not already present
-if [ ! -d "./FuxiCTR" ]; then
-    echo "[0/3] Cloning FuxiCTR …"
-    git clone https://github.com/reczoo/FuxiCTR.git
-fi
+echo "[1/3] Fetching FuxiCTR …"
+bash setup_fuxictr.sh
 
-# Install python requirements
-pip install -q fuxictr scikit-learn pandas numpy pyyaml torch
+echo "[2/3] Preprocessing KuaiRand-1K (shared chronological split) …"
+python preprocess.py --data-dir "$DATA_DIR"
 
-# 1. Preprocess
-echo ""
-echo "[1/3] Preprocessing KuaiRand-1K …"
-python preprocess.py
+echo "[3/3] Training + evaluating ${MODEL} on GPU ${GPU} …"
+python train.py --model "$MODEL" --gpu "$GPU"
 
-# 2. Train
-echo ""
-echo "[2/3] Training model(s): ${MODEL} on GPU=${GPU} …"
-python train.py --model "${MODEL}" --gpu "${GPU}"
-
-# 3. Evaluate
-echo ""
-echo "[3/3] Evaluating …"
-python evaluate.py --model "${MODEL}" --gpu "${GPU}" \
-    --out_csv ../runs/baselines/evaluation_results.csv \
-    || python step3b_evaluate_standalone.py \
-           --model "${MODEL}" --gpu "${GPU}" \
-           --out_csv ../runs/baselines/evaluation_results.csv
-
-echo ""
-echo "========================================================"
-echo "  Pipeline complete.  Results: ./results/"
-echo "========================================================"
+echo "Done. Results: ../runs/<Model>/final_metrics.json"

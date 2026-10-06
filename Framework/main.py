@@ -1,34 +1,29 @@
 """
 main.py  —  KuaiRand CVR Training & Evaluation Pipeline
 ---------------------------------------------------------
-Temporal train/test split -> HKG construction -> dual-GNN training ->
-metrics on train and held-out test set.
+Global chronological train/val/test split -> timed HKG -> dual-GNN training
+with checkpoint selection on validation -> one evaluation of the selected
+checkpoint on test.
 
-Works for both KuaiRand-1K and KuaiRand-27K.
+Every interaction at time t is scored from inputs built from interactions
+before t only (temporal.py): it is encoded from the graph snapshot taken at the
+start of its period, and its session embedding pools only the items watched
+earlier in the same session.
 
 Memory strategy
 ---------------
-With 4.4M videos the naive approach (move all node embeddings to GPU at once)
-exhausts VRAM.  This file uses three mitigations:
-
-  1. CPU-resident graph  —  HeteroData stays on CPU.  Only the sampled
-     mini-batch of node embeddings is moved to GPU per step, not the
-     entire 4.4M × hidden_dim matrix.
-
-  2. Neighbourhood sampling  —  Instead of full-graph R-GCN (which builds
-     a [N_all, hidden] tensor on GPU), we use PyG's NeighborLoader to
-     sample a fixed-size k-hop subgraph around each batch's nodes.  Only
-     those sampled nodes hit the GPU.
-
-  3. fp16 mixed precision  —  torch.autocast halves activation memory
-     with no code change to the model itself.
+  1. CPU-resident graph  —  the timed HeteroData stays on CPU; each snapshot
+     view is moved to the encoder device only while it is being encoded.
+  2. Relation edge sampling  —  at most --max-edges edges per relation type
+     feed the R-GCN / HGT, sampled once per snapshot.
+  3. fp16 mixed precision  —  torch.autocast on the batch loop.
 
 Caching
 -------
-  --cache-dir  controls where the HKG is serialised.  On first run the
+  --cache-dir  controls where the timed HKG is serialised.  On first run the
                graph is built from CSVs and saved; on subsequent runs it
-               is loaded in seconds.  The best model checkpoint is also
-               saved to this directory and reloaded automatically.
+               is loaded in seconds.  Checkpoints go to the run directory
+               under --output-dir.
 
 Usage
 -----
@@ -74,15 +69,17 @@ from sklearn.metrics import (
     ndcg_score,
     roc_auc_score,
 )
-from torch.utils.data import DataLoader, Dataset
 from torch_geometric.data import HeteroData
-from torch_geometric.loader import NeighborLoader
 from tqdm import tqdm
 
-from data_loader import KuaiRandData, KuaiRandLoader
+from data_loader import SPLIT_TEST, SPLIT_TRAIN, SPLIT_VAL, KuaiRandData, KuaiRandLoader
 from gnn_encoders import SequentialGNN, StructuralGNN, SingleHGT
 from hkg_constructor import HKGBundle, HKGConstructor
 from models import AlignmentModule, CVRHead, KuaiCVRModel, SingleGNNModel
+from temporal import (
+    Interactions, PrefixBatcher, SnapshotStore,
+    assign_snapshots, build_interactions, snapshot_boundaries,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -94,7 +91,7 @@ logger = logging.getLogger(__name__)
 
 # ── Cache helpers ─────────────────────────────────────────────────────────────
 
-HKG_CACHE_FILE = "hkg_bundle.pkl"
+HKG_CACHE_FILE = "hkg_bundle_timed.pkl"
 ARGS_CACHE_FILE = "run_args.json"
 
 
@@ -115,7 +112,8 @@ def save_hkg(bundle: HKGBundle, cache_dir: Path) -> None:
     logger.info("HKG cached -> %s  (%.1f MB)", path, path.stat().st_size / 1e6)
 
 
-def load_hkg(cache_dir: Path) -> HKGBundle | None:
+def load_hkg(cache_dir: Path, data: KuaiRandData) -> HKGBundle | None:
+    """Load the cached timed HKG, or None if absent or built for other data."""
     path = _hkg_cache_path(cache_dir)
     if not path.exists():
         return None
@@ -123,6 +121,17 @@ def load_hkg(cache_dir: Path) -> HKGBundle | None:
     t0 = time.time()
     with open(path, "rb") as f:
         bundle = pickle.load(f)
+    et = ("user", "interacted", "video")
+    ok = (
+        et in bundle.full_graph.edge_types
+        and "edge_time" in bundle.full_graph[et]
+        and bundle.n_videos   == len(data.video_id_map)
+        and bundle.n_sessions == data.n_sessions
+        and bundle.full_graph[et].edge_index.shape[1] == len(data.log_combined)
+    )
+    if not ok:
+        logger.warning("Cached HKG does not match this data — rebuilding.")
+        return None
     logger.info("HKG loaded from cache in %.1fs", time.time() - t0)
     return bundle
 
@@ -152,33 +161,6 @@ def load_checkpoint(model, device: torch.device,
     auc = float(ckpt.get("best_auc", 0.0))
     logger.info("Checkpoint loaded from %s  (AUC=%.4f)", ckpt_path, auc)
     return auc
-
-
-# ── Dataset ───────────────────────────────────────────────────────────────────
-
-class InteractionDataset(Dataset):
-    """
-    Flat dataset of (user_idx, video_idx, session_idx, ips_weight, label).
-
-    Stored on CPU as a float32 ndarray; moved to GPU per-batch by the
-    DataLoader pin_memory + non_blocking mechanism.
-    """
-
-    def __init__(self, interactions: np.ndarray) -> None:
-        self.data = torch.from_numpy(interactions).float()
-
-    def __len__(self) -> int:
-        return len(self.data)
-
-    def __getitem__(self, idx: int):
-        row = self.data[idx]
-        return {
-            "user_idx":    row[0].long(),
-            "video_idx":   row[1].long(),
-            "session_idx": row[2].long(),
-            "ips_weight":  row[3],
-            "label":       row[4],
-        }
 
 
 # ── Metrics ───────────────────────────────────────────────────────────────────
@@ -252,58 +234,6 @@ def compute_metrics(split: str, labels: np.ndarray,
     if user_idxs is not None:
         m.ndcg10 = _per_user_ndcg_at_k(user_idxs, labels, probas, k=10)
     return m
-
-
-# ── Temporal split ────────────────────────────────────────────────────────────
-
-def temporal_split(data: KuaiRandData,
-                   test_ratio: float = 0.2) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Split interactions by time_ms.  The earliest (1-test_ratio) fraction
-    is train; the most recent test_ratio fraction is test.
-
-    Memory-efficient for 27K: works with only the columns needed and avoids
-    full DataFrame copies.  Peak RAM is approximately one copy of the 5-column
-    interaction array rather than multiple copies of the full session_map.
-
-    Returns np.ndarray of shape [N, 5]:
-        columns: user_idx, video_idx, session_idx, ips_weight, is_click
-    """
-    uid_map = data.user_id_map
-    vid_map = data.video_id_map
-    sm      = data.session_map
-
-    # Work only on the 6 columns we need — avoids copying all ~20 columns
-    needed = ["user_id", "video_id", "session_id", "time_ms", "is_rand", "is_click"]
-    present = [c for c in needed if c in sm.columns]
-    df = sm[present].copy()
-
-    # Filter to users/videos in the id maps
-    mask = df["user_id"].isin(uid_map) & df["video_id"].isin(vid_map)
-    df   = df[mask].reset_index(drop=True)
-
-    # Map ids to contiguous integers in-place (avoids extra columns)
-    df["u_idx"] = df["user_id"].map(uid_map).astype(np.int32)
-    df["v_idx"] = df["video_id"].map(vid_map).astype(np.int32)
-    df["ips"]   = np.where(df["is_rand"].values == 1,
-                           np.float32(1.0), np.float32(0.9963))
-
-    # Free the large string/int64 columns we no longer need before sorting
-    df.drop(columns=["user_id", "video_id", "is_rand"], inplace=True)
-
-    df = df.sort_values("time_ms").reset_index(drop=True)
-    cutoff = int(len(df) * (1 - test_ratio))
-    cols   = ["u_idx", "v_idx", "session_id", "ips", "is_click"]
-
-    train_arr = df.iloc[:cutoff][cols].values.astype(np.float32)
-    test_arr  = df.iloc[cutoff:][cols].values.astype(np.float32)
-
-    # Free df before returning — caller only needs the numpy arrays
-    del df
-
-    logger.info("Temporal split  train=%s  test=%s",
-                f"{len(train_arr):,}", f"{len(test_arr):,}")
-    return train_arr, test_arr
 
 
 # ── Memory-safe relation edge index ───────────────────────────────────────────
@@ -505,514 +435,111 @@ def build_single_model(data: KuaiRandData, bundle: HKGBundle,
     return model
 
 
-# ── Pre-computed embedding encode step ───────────────────────────────────────
+# ── Snapshot encode + split runner ────────────────────────────────────────────
 
-def encode_epoch(
-    model:   KuaiCVRModel,
-    sg:      HeteroData,
-    qg:      HeteroData,
-    rel_ei:  torch.Tensor,
-    rel_t:   torch.Tensor,
-    sess_id: torch.Tensor,
-    device:  torch.device,
-) -> dict:
+def encode_snapshot(model, store: SnapshotStore, k: int, model_type: str) -> dict:
     """
-    Run both GNNs once over the FULL graph with no gradients.
-
-    Returns CPU tensors to avoid holding the full embedding matrices on GPU
-    between batches.  They are moved to GPU lazily inside the batch loop.
-
-    This replaces the per-batch subgraph approach which was scanning millions
-    of edges on CPU every step and causing the training hang.
+    Run the (frozen) encoders over snapshot k, i.e. the graph of behaviour
+    before store.boundaries[k].  Encoders run in eval mode so embeddings are
+    deterministic.  Returns embeddings on the head device.
     """
-    tqdm.write("      Encoding graph (GNN forward pass) …")
-    t0 = time.time()
-    emb = model.encode_graph(sg, qg, rel_ei, rel_t, sess_id)
-    # Move to CPU immediately to free GPU memory for the batch loop
-    emb_cpu = {k: v.cpu() for k, v in emb.items()}
-    tqdm.write(f"      Encoded in {time.time()-t0:.1f}s  "
-               f"s_user={emb_cpu['s_user'].shape}  "
-               f"s_video={emb_cpu['s_video'].shape}")
-    return emb_cpu
-
-
-# ── Single-model encode helper ────────────────────────────────────────────────
-
-def _encode_single(
-    model:       "SingleGNNModel",
-    bundle:      HKGBundle,
-    full_rel_ei: torch.Tensor,
-    full_rel_t:  torch.Tensor,
-    sess_id:     torch.Tensor,
-    device:      torch.device,
-) -> dict:
-    """Encode the full HKG with the single HGT model."""
-    tqdm.write("      Encoding full HKG with SingleHGT …")
-    t0  = time.time()
-    emb = model.encode_graph(
-        bundle.full_graph, full_rel_ei, full_rel_t, sess_id)
-    emb_cpu = {k: v.cpu() for k, v in emb.items()}
-    # Map to the key names expected by run_epoch / forward_from_embeddings
-    out = {
-        "s_user":    emb_cpu["user"],
-        "s_video":   emb_cpu["video"],
-        "q_video":   emb_cpu["video"],    # same tensor — no separate seq encoder
-        "q_session": emb_cpu["session"],
-    }
-    tqdm.write(f"      Encoded in {time.time()-t0:.1f}s")
-    return out
-
-
-# ── Dual-GPU parallel encode ──────────────────────────────────────────────────
-
-def encode_epoch_dual_gpu(
-    model:      KuaiCVRModel,
-    sg:         HeteroData,
-    qg:         HeteroData,
-    rel_ei:     torch.Tensor,   # on cuda:0
-    rel_t:      torch.Tensor,   # on cuda:0
-    sess_id:    torch.Tensor,   # on cuda:1
-    chunk_size: int = 500_000,
-) -> dict:
-    """
-    Encode the graph using two GPUs in parallel via Python threads.
-
-    GPU 0: StructuralGNN  — R-GCN over all node types, chunked over videos.
-    GPU 1: SequentialGNN  — GGNN over session graph, chunked over videos.
-
-    Both write their output to pinned CPU RAM simultaneously.  The batch
-    loop then runs on GPU 0 (alignment + CVR head) using small [B, D] slices
-    transferred from CPU via non_blocking pin_memory.
-
-    Peak GPU memory per device:
-        GPU 0: (chunk_size + n_users + n_authors + n_cats) × hidden_dim
-        GPU 1: chunk_size × hidden_dim  (sequential graph is video-only)
-
-    With chunk_size=500K and hidden_dim=128:
-        GPU 0: ~(500K + 1.4M) × 128 × 4B ≈ 1.0 GB
-        GPU 1: 500K × 128 × 4B            ≈ 0.25 GB
-    Both well within 93 GB each.
-    """
-    import threading
-
-    dev0 = torch.device(f"cuda:{model._gpu_structural}")
-    dev1 = torch.device(f"cuda:{model._gpu_sequential}")
-
-    n_video  = sg["video"].num_nodes
-    n_chunks = (n_video + chunk_size - 1) // chunk_size
-
-    # Pre-allocate pinned output tensors on CPU for zero-copy transfer
-    D = next(model.structural_gnn.parameters()).shape[0]  # out_dim
-    # Resolve actual out_dim from the output projection layer
-    for m in model.structural_gnn.modules():
-        if hasattr(m, 'out_features'):
-            D = m.out_features
-            break
-
-    s_user_out   = torch.zeros(sg["user"].num_nodes, D).pin_memory()
-    s_video_out  = torch.zeros(n_video,              D).pin_memory()
-    q_video_out  = torch.zeros(n_video,              D).pin_memory()
-    q_session_out = torch.zeros(
-        qg["session"].num_nodes, D
-    ).pin_memory()
-
-    errors: list = []
-
-    # ── Thread 0: Structural GNN on GPU 0 ────────────────────────────────────
-    def run_structural():
-        try:
-            import torch.nn.functional as Fs
-            with torch.no_grad():
-                # Encode small node types once
-                h_user = model.structural_gnn._encode_user(
-                    sg["user"].x.to(dev0), sg["user"].onehot.to(dev0))
-                h_author   = Fs.relu(model.structural_gnn.author_proj(
-                    sg["author"].x.to(dev0)))
-                h_category = Fs.relu(model.structural_gnn.category_proj(
-                    sg["category"].x.to(dev0)))
-
-                n_u = h_user.shape[0]
-                n_a = h_author.shape[0]
-
-                # Re-map rel_ei (already on dev0)
-                n_user_g  = sg["user"].num_nodes
-                n_author_g = sg["author"].num_nodes
-
-                pbar = tqdm(range(n_chunks), desc="  struct",
-                            unit="chunk", leave=False, dynamic_ncols=True)
-                for c in pbar:
-                    v0, v1 = c * chunk_size, min((c+1)*chunk_size, n_video)
-                    C = v1 - v0
-                    h_vid = Fs.relu(model.structural_gnn.video_proj(
-                        sg["video"].x[v0:v1].to(dev0)))
-
-                    h_all = torch.cat([h_user, h_vid, h_author, h_category], dim=0)
-
-                    # Filter + remap edges for this chunk
-                    vlo, vhi = n_user_g + v0, n_user_g + v1
-                    src, dst = rel_ei[0], rel_ei[1]
-                    src_vid = (src >= n_user_g) & (src < n_user_g + n_video)
-                    dst_vid = (dst >= n_user_g) & (dst < n_user_g + n_video)
-                    src_ok  = (~src_vid) | ((src >= vlo) & (src < vhi))
-                    dst_ok  = (~dst_vid) | ((dst >= vlo) & (dst < vhi))
-                    valid   = src_ok & dst_ok
-                    ei      = rel_ei[:, valid].clone()
-                    rt      = rel_t[valid]
-                    # Remap video positions to chunk-local
-                    sv = (ei[0] >= n_user_g) & (ei[0] < n_user_g + n_video)
-                    dv = (ei[1] >= n_user_g) & (ei[1] < n_user_g + n_video)
-                    ei[0, sv] -= v0
-                    ei[1, dv] -= v0
-                    shift = n_video - C
-                    ei[0, ei[0] >= n_user_g + C] -= shift
-                    ei[1, ei[1] >= n_user_g + C] -= shift
-
-                    for layer in model.structural_gnn.rgcn_layers:
-                        h_all = Fs.relu(
-                            model.structural_gnn.norm(layer(h_all, ei, rt)))
-
-                    s_video_out[v0:v1] = model.structural_gnn.video_out(
-                        h_all[n_u: n_u + C]).cpu()
-                    pbar.set_postfix({"done": f"{v1:,}"})
-
-                # User embeddings (full pass was already done above)
-                s_user_out[:] = model.structural_gnn.user_out(h_user).cpu()
-
-        except Exception as e:
-            errors.append(("structural", e))
-
-    # ── Thread 1: Sequential GNN on GPU 1 ────────────────────────────────────
-    def run_sequential():
-        try:
-            import torch.nn.functional as Fq
-            seq_et = ("video", "next_in_session", "video")
-            ei_seq = qg[seq_et].edge_index   # CPU
-
-            with torch.no_grad():
-                pbar = tqdm(range(n_chunks), desc="  seq   ",
-                            unit="chunk", leave=False, dynamic_ncols=True)
-                for c in pbar:
-                    v0, v1 = c * chunk_size, min((c+1)*chunk_size, n_video)
-                    x = qg["video"].x[v0:v1].to(dev1)
-                    h = Fq.relu(model.sequential_gnn.input_proj(x))
-
-                    src, dst = ei_seq[0], ei_seq[1]
-                    in_c = (src >= v0) & (src < v1) & \
-                           (dst >= v0) & (dst < v1)
-                    ei_loc = (ei_seq[:, in_c] - v0).to(dev1)
-
-                    h = model.sequential_gnn.norm(
-                        model.sequential_gnn.ggnn(h, ei_loc))
-                    q_video_out[v0:v1] = model.sequential_gnn.out_proj(h).cpu()
-                    pbar.set_postfix({"done": f"{v1:,}"})
-
-                # Session embeddings
-                full_seq = model.sequential_gnn(qg, sess_id)
-                q_session_out[:] = full_seq["session"].cpu()
-
-        except Exception as e:
-            errors.append(("sequential", e))
-
-    tqdm.write(f"      Dual-GPU encode: {n_chunks} chunks × {chunk_size:,} videos …")
-    t0 = time.time()
-
-    t_struct = threading.Thread(target=run_structural, name="struct-gpu0")
-    t_seq    = threading.Thread(target=run_sequential, name="seq-gpu1")
-    t_struct.start()
-    t_seq.start()
-    t_struct.join()
-    t_seq.join()
-
-    if errors:
-        for name, exc in errors:
-            tqdm.write(f"ERROR in {name} thread: {exc}")
-        raise RuntimeError(f"Dual-GPU encode failed: {[e[0] for e in errors]}")
-
-    tqdm.write(f"      Dual-GPU encode done in {time.time()-t0:.1f}s  "
-               f"RAM ~{(s_video_out.numel()+q_video_out.numel())*4/1e9:.1f} GB")
-
-    return {
-        "s_user":    s_user_out,
-        "s_video":   s_video_out,
-        "q_video":   q_video_out,
-        "q_session": q_session_out,
-    }
-
-
-# ── Chunked encode for 27K ────────────────────────────────────────────────────
-
-def encode_epoch_chunked(
-    model:      KuaiCVRModel,
-    sg:         HeteroData,
-    qg:         HeteroData,
-    rel_ei:     torch.Tensor,
-    rel_t:      torch.Tensor,
-    sess_id:    torch.Tensor,
-    device:     torch.device,
-    chunk_size: int = 500_000,
-) -> dict:
-    """
-    Memory-safe graph encoding for 27K (32M videos).
-
-    Problem with full encode_epoch on 27K
-    ---------------------------------------
-    encode_graph runs the R-GCN by concatenating ALL node types into h_all:
-        [27K users | 32M videos | 1.4M authors | categories]
-    That single tensor at hidden_dim=128 is ~17 GB on GPU — OOM.
-    Plus the output embedding matrices (s_video, q_video) would be ~8 GB
-    each on CPU.
-
-    Solution: chunk the video node features
-    -----------------------------------------
-    1. Run the structural GNN with the FULL edge index but only a chunk of
-       video node features at a time, accumulating output embeddings on CPU.
-    2. For sequential, chunk the video node embeddings from the GGNN similarly.
-
-    This keeps peak GPU usage to:
-        (chunk_size + n_users + n_authors + n_categories) × hidden_dim
-    e.g. 500K chunk → ~256 MB instead of 17 GB.
-
-    Trade-off: message passing is approximate — edges between chunk members
-    and out-of-chunk nodes carry their initialised (pre-layer) features, not
-    the updated ones.  This is equivalent to 1-hop GraphSAGE sampling and is
-    standard practice for graphs of this scale.
-    """
-    tqdm.write("      Encoding graph in chunks (27K mode) …")
-    t0 = time.time()
-
-    dev = next(model.parameters()).device
-
-    n_user   = sg["user"].num_nodes
-    n_video  = sg["video"].num_nodes
-    n_author = sg["author"].num_nodes
-
-    # ── Structural: encode users + fixed non-video nodes once ─────────────────
-    with torch.no_grad():
-        h_user_in     = model.structural_gnn._encode_user(
-            sg["user"].x.to(dev), sg["user"].onehot.to(dev)
-        )                                                          # [n_user, H]
-        h_author_in   = F.relu(model.structural_gnn.author_proj(
-            sg["author"].x.to(dev)))                               # [n_author, H]
-        h_category_in = F.relu(model.structural_gnn.category_proj(
-            sg["category"].x.to(dev)))                             # [n_cat, H]
-
-    import torch.nn.functional as F_local
-
-    s_video_chunks, q_video_chunks = [], []
-
-    n_chunks = (n_video + chunk_size - 1) // chunk_size
-    chunk_bar = tqdm(range(n_chunks), desc="      chunks",
-                     unit="chunk", leave=False, dynamic_ncols=True)
-
-    for c in chunk_bar:
-        v_start = c * chunk_size
-        v_end   = min(v_start + chunk_size, n_video)
-
-        # ── Structural chunk ──────────────────────────────────────────────────
-        with torch.no_grad():
-            h_video_chunk = F_local.relu(model.structural_gnn.video_proj(
-                sg["video"].x[v_start:v_end].to(dev)))             # [C, H]
-
-            # Build h_all for this chunk: user | video_chunk | author | cat
-            h_all = torch.cat([h_user_in, h_video_chunk,
-                                h_author_in, h_category_in], dim=0)
-
-            # Filter relation edges to those whose video endpoints fall in chunk.
-            # Video nodes in the chunk have global offsets [v_start, v_end).
-            # In rel_ei they appear at positions [n_user+v_start, n_user+v_end).
-            chunk_v_lo = n_user + v_start
-            chunk_v_hi = n_user + v_end
-
-            # Remap video indices in rel_ei to chunk-local positions
-            # Keep only edges where BOTH src and dst are in-scope for h_all.
-            # h_all layout: [0..n_user | n_user..n_user+chunk | ...]
-            # We shift video global offsets → chunk-local offsets.
-            src = rel_ei[0].clone()
-            dst = rel_ei[1].clone()
-
-            # Identify video positions in each side
-            src_is_video = (src >= n_user) & (src < n_user + n_video)
-            dst_is_video = (dst >= n_user) & (dst < n_user + n_video)
-
-            # For video positions: remap global → chunk-local
-            # out-of-chunk video edges are dropped
-            src_in_chunk = src_is_video & (src >= chunk_v_lo) & (src < chunk_v_hi)
-            dst_in_chunk = dst_is_video & (dst >= chunk_v_lo) & (dst < chunk_v_hi)
-
-            # Keep edge if: neither side is a video, OR the video side is in chunk
-            src_ok = (~src_is_video) | src_in_chunk
-            dst_ok = (~dst_is_video) | dst_in_chunk
-            valid  = src_ok & dst_ok
-
-            ei_chunk = rel_ei[:, valid].clone()
-            rt_chunk = rel_t[valid]
-
-            # Remap video global indices → chunk-local (subtract v_start from
-            # video positions; non-video positions shift too, fix below)
-            # Easier: rebase everything relative to h_all layout for this chunk.
-            # h_all = [user(0..n_user) | video_chunk(n_user..n_user+C) |
-            #          author(n_user+C..) | cat(..)]
-            C = v_end - v_start
-            # Positions that were video global → subtract v_start to get chunk pos
-            src_vid_mask = (ei_chunk[0] >= n_user) & (ei_chunk[0] < n_user + n_video)
-            dst_vid_mask = (ei_chunk[1] >= n_user) & (ei_chunk[1] < n_user + n_video)
-            ei_chunk[0, src_vid_mask] -= v_start
-            ei_chunk[1, dst_vid_mask] -= v_start
-            # Author/category positions need to shift down by (n_video - C)
-            shift = n_video - C
-            src_auth_mask = ei_chunk[0] >= (n_user + n_video)
-            dst_auth_mask = ei_chunk[1] >= (n_user + n_video)
-            ei_chunk[0, src_auth_mask] -= shift
-            ei_chunk[1, dst_auth_mask] -= shift
-
-            for layer in model.structural_gnn.rgcn_layers:
-                h_all = F_local.relu(
-                    model.structural_gnn.norm(layer(h_all, ei_chunk, rt_chunk))
-                )
-
-            # Extract video chunk output: positions n_user .. n_user+C
-            h_vid_out = model.structural_gnn.video_out(h_all[n_user: n_user + C])
-            s_video_chunks.append(h_vid_out.cpu())
-
-        # ── Sequential chunk ──────────────────────────────────────────────────
-        with torch.no_grad():
-            seq_et    = ("video", "next_in_session", "video")
-            ei_seq    = qg[seq_et].edge_index
-            x_chunk   = qg["video"].x[v_start:v_end].to(dev)
-            h_seq     = F_local.relu(model.sequential_gnn.input_proj(x_chunk))
-
-            # Filter sequential edges to this chunk
-            src_seq   = ei_seq[0]
-            dst_seq   = ei_seq[1]
-            in_chunk  = (src_seq >= v_start) & (src_seq < v_end) & \
-                        (dst_seq >= v_start) & (dst_seq < v_end)
-            ei_local  = ei_seq[:, in_chunk] - v_start  # local 0-based
-
-            ei_local  = ei_local.to(dev)
-            h_seq     = model.sequential_gnn.norm(
-                model.sequential_gnn.ggnn(h_seq, ei_local))
-
-            q_video_chunks.append(
-                model.sequential_gnn.out_proj(h_seq).cpu())
-
-        chunk_bar.set_postfix({"videos_done": f"{v_end:,}"})
-
-    chunk_bar.close()
-
-    # Encode users and sessions (small — full pass)
-    with torch.no_grad():
-        full_struct = model.structural_gnn(sg, rel_ei, rel_t)
-        full_seq    = model.sequential_gnn(qg, sess_id)
-
-    emb_cpu = {
-        "s_user":    full_struct["user"].cpu(),
-        "s_video":   torch.cat(s_video_chunks, dim=0),
-        "q_video":   torch.cat(q_video_chunks, dim=0),
-        "q_session": full_seq["session"].cpu(),
-    }
-
-    tqdm.write(f"      Chunked encode done in {time.time()-t0:.1f}s  "
-               f"s_video={emb_cpu['s_video'].shape}  "
-               f"RAM ~{sum(v.numel()*4 for v in emb_cpu.values())/1e9:.1f} GB")
-    return emb_cpu
-
-
-# ── One epoch ─────────────────────────────────────────────────────────────────
-
-def run_epoch(
-    model:     KuaiCVRModel,
-    loader:    DataLoader,
-    emb:       dict,          # pre-computed CPU embeddings from encode_epoch
-    n_sess:    int,
-    device:    torch.device,
-    optimizer: torch.optim.Optimizer | None,
-    scaler:    torch.cuda.amp.GradScaler | None,
-    split:     str,
-    use_amp:   bool,
-    no_ips:    bool = False,
+    view = store.view(k)
+    rel_ei, rel_t = store.rel[k]
+    if model_type == "single":
+        enc = model.hgt
+    else:
+        enc = model.structural_gnn
+    enc_dev = next(enc.parameters()).device
+
+    was_training = model.training
+    model.eval()
+    if model_type == "single":
+        emb = model.encode_graph(view.full_graph, rel_ei.to(enc_dev), rel_t.to(enc_dev))
+    else:
+        emb = model.encode_graph(view.structural_graph, view.sequential_graph,
+                                 rel_ei.to(enc_dev), rel_t.to(enc_dev))
+    model.train(was_training)
+    head_dev = model.head_device
+    return {k_: v.to(head_dev) for k_, v in emb.items()}
+
+
+def run_split(
+    model,
+    rows:       np.ndarray,          # row indices into the Interactions table
+    snap_of:    np.ndarray,          # [N] snapshot index per row
+    store:      SnapshotStore,
+    batcher:    PrefixBatcher,
+    model_type: str,
+    batch_size: int,
+    optimizer:  torch.optim.Optimizer | None,
+    scaler:     torch.cuda.amp.GradScaler | None,
+    split:      str,
+    use_amp:    bool,
+    no_ips:     bool = False,
 ) -> Metrics:
     """
-    One pass over the DataLoader using pre-computed graph embeddings.
-
-    The GNNs are NOT called here — encode_epoch() handles that once per epoch.
-    This loop only runs: index lookup → alignment → CVR head → loss/backward.
-    Each batch takes milliseconds instead of minutes.
+    One pass over `rows`, snapshot by snapshot.  For each snapshot the
+    encoders run once and its rows are scored in mini-batches (train: shuffled
+    snapshot order and shuffled rows within each snapshot).
     """
     is_train = optimizer is not None
-    model.train() if is_train else model.eval()
+    head_dev = model.head_device
 
-    # Determine which device runs the head (alignment + CVR)
-    head_dev = model.head_device if hasattr(model, 'head_device') else device
-
-    # Move embedding matrices to head device once for the whole epoch
-    emb_dev = {k: v.to(head_dev, non_blocking=True) for k, v in emb.items()}
+    snaps = np.unique(snap_of[rows])
+    if is_train:
+        snaps = np.random.permutation(snaps)
 
     total_loss, all_labels, all_probas, all_users = 0.0, [], [], []
-    n_seen  = 0
-    ctx     = torch.enable_grad() if is_train else torch.no_grad()
-    bar_fmt = "{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining} {rate_fmt}] {postfix}"
+    pbar = tqdm(total=len(rows), desc=f"  {split:5s}", unit="row",
+                dynamic_ncols=True, leave=False)
 
-    pbar = tqdm(
-        loader,
-        desc          = f"  {split:5s}",
-        unit          = "batch",
-        bar_format    = bar_fmt,
-        dynamic_ncols = True,
-        leave         = False,
-    )
+    for k in snaps:
+        sel = rows[snap_of[rows] == k]
+        if is_train:
+            sel = np.random.permutation(sel)
+        emb = encode_snapshot(model, store, int(k), model_type)
+        model.train() if is_train else model.eval()
+        ctx = torch.enable_grad() if is_train else torch.no_grad()
 
-    with ctx:
-        for batch in pbar:
-            user_idx    = batch["user_idx"].to(head_dev, non_blocking=True)
-            video_idx   = batch["video_idx"].to(head_dev, non_blocking=True)
-            session_idx = batch["session_idx"].to(head_dev, non_blocking=True).clamp(0, n_sess - 1)
-            ips_weights = batch["ips_weight"].to(head_dev, non_blocking=True)
-            labels      = batch["label"].to(head_dev, non_blocking=True)
+        with ctx:
+            for b0 in range(0, len(sel), batch_size):
+                batch = batcher(sel[b0:b0 + batch_size])
+                batch = {key: v.to(head_dev, non_blocking=True) for key, v in batch.items()}
+                ips_weights = torch.ones_like(batch["ips_weight"]) if no_ips else batch["ips_weight"]
 
-            if no_ips:
-                ips_weights = torch.ones_like(ips_weights)
+                with torch.autocast(device_type=head_dev.type, enabled=use_amp):
+                    out = model.forward_from_embeddings(
+                        emb          = emb,
+                        user_idx     = batch["user_idx"],
+                        video_idx    = batch["video_idx"],
+                        prefix_items = batch["prefix_items"],
+                        ips_weights  = ips_weights,
+                        labels       = batch["label"],
+                    )
 
-            with torch.autocast(device_type=head_dev.type, enabled=use_amp):
-                out = model.forward_from_embeddings(
-                    emb         = emb_dev,
-                    user_idx    = user_idx,
-                    video_idx   = video_idx,
-                    session_idx = session_idx,
-                    ips_weights = ips_weights,
-                    labels      = labels,
-                )
+                if is_train:
+                    optimizer.zero_grad(set_to_none=True)
+                    if scaler is not None and use_amp:
+                        scaler.scale(out["loss"]).backward()
+                        scaler.unscale_(optimizer)
+                        nn.utils.clip_grad_norm_(model.parameters(), 5.0)
+                        scaler.step(optimizer)
+                        scaler.update()
+                    else:
+                        out["loss"].backward()
+                        nn.utils.clip_grad_norm_(model.parameters(), 5.0)
+                        optimizer.step()
 
-            if is_train:
-                optimizer.zero_grad(set_to_none=True)
-                if scaler is not None:
-                    scaler.scale(out["loss"]).backward()
-                    scaler.unscale_(optimizer)
-                    nn.utils.clip_grad_norm_(model.parameters(), 5.0)
-                    scaler.step(optimizer)
-                    scaler.update()
-                else:
-                    out["loss"].backward()
-                    nn.utils.clip_grad_norm_(model.parameters(), 5.0)
-                    optimizer.step()
-
-            n           = batch["label"].shape[0]
-            total_loss += out["loss"].item() * n
-            n_seen     += n
-            running_loss = total_loss / max(n_seen, 1)
-
-            all_labels.append(batch["label"].cpu().numpy())
-            all_probas.append(out["proba"].detach().cpu().float().numpy())
-            all_users.append(batch["user_idx"].cpu().numpy())
-
-            postfix: dict = {"loss": f"{running_loss:.4f}"}
-            if torch.cuda.is_available():
-                postfix["gpu"] = f"{torch.cuda.memory_allocated()/1e9:.1f}GB"
-            pbar.set_postfix(postfix)
+                n = batch["label"].shape[0]
+                total_loss += out["loss"].item() * n
+                all_labels.append(batch["label"].cpu().numpy())
+                all_probas.append(out["proba"].detach().cpu().float().numpy())
+                all_users.append(batch["user_idx"].cpu().numpy())
+                pbar.update(n)
+                pbar.set_postfix({"loss": f"{total_loss / max(pbar.n, 1):.4f}"})
+        del emb
 
     pbar.close()
-    # Free GPU embedding copies
-    del emb_dev
-
     labels_np    = np.concatenate(all_labels)
     probas_np    = np.concatenate(all_probas)
     user_idxs_np = np.concatenate(all_users)
@@ -1052,8 +579,16 @@ def parse_args() -> argparse.Namespace:
 
     # Data loading
     p.add_argument("--min-interactions", type=int,   default=10)
+    p.add_argument("--val-ratio",        type=float, default=0.1)
     p.add_argument("--test-ratio",       type=float, default=0.2)
-    p.add_argument("--max-seq-len",      type=int,   default=50)
+    p.add_argument("--max-seq-len",      type=int,   default=50,
+                   help="Max earlier items of the same session pooled per interaction")
+    p.add_argument("--snapshot-hours",   type=float, default=24.0,
+                   help="Graph snapshot period: interactions are encoded from the "
+                        "graph as of the start of their period")
+    p.add_argument("--warmup-hours",     type=float, default=0.0,
+                   help="Training interactions this close to the start of the log "
+                        "are used only as history, not as training targets")
 
     # Model
     p.add_argument("--kg-alignment", type=int, default=0)
@@ -1083,8 +618,7 @@ def parse_args() -> argparse.Namespace:
 
     p.add_argument("--multi-gpu", action="store_true",
                    help="Split model across 2 GPUs: structural on cuda:0, "
-                        "sequential on cuda:1, head on cuda:0. "
-                        "Enables parallel encode_epoch for 27K.")
+                        "sequential on cuda:1, head on cuda:0.")
     p.add_argument("--gpu-structural", type=int, default=0,
                    help="GPU index for StructuralGNN (default 0)")
     p.add_argument("--gpu-sequential", type=int, default=1,
@@ -1092,8 +626,6 @@ def parse_args() -> argparse.Namespace:
     # Memory controls
     p.add_argument("--max-edges",   type=int, default=200_000,
                    help="Max edges per relation type sampled for R-GCN.")
-    p.add_argument("--chunk-size",  type=int, default=500_000,
-                   help="Video node chunk size for 27K encoding (reduce if OOM).")
 
     return p.parse_args()
 
@@ -1202,64 +734,59 @@ def main() -> None:
     ).load()
     tqdm.write(f"      Done in {time.time()-t0:.1f}s  →  {data}")
 
-    # ── 2. Temporal split ─────────────────────────────────────────────────────
-    tqdm.write("[2/5] Temporal train/test split …")
-    train_arr, test_arr = temporal_split(data, test_ratio=args.test_ratio)
+    # ── 2. Chronological split + causal session prefixes ─────────────────────
+    tqdm.write("[2/5] Chronological train/val/test split …")
+    inter = build_interactions(data, args.val_ratio, args.test_ratio,
+                               max_prefix=args.max_seq_len)
+    t_val, t_test = inter.t_val, inter.t_test
 
-    # Keep DataLoaders on CPU (pin_memory moves to GPU per batch)
-    dl_kwargs = dict(num_workers=0, pin_memory=(device.type == "cuda"))
-    train_loader = DataLoader(InteractionDataset(train_arr),
-                              batch_size=args.batch_size, shuffle=True,  **dl_kwargs)
-    test_loader  = DataLoader(InteractionDataset(test_arr),
-                              batch_size=args.batch_size * 2, shuffle=False, **dl_kwargs)
-    del train_arr, test_arr   # numpy arrays are now inside the DataLoaders
+    boundaries = snapshot_boundaries(inter.time, t_val, t_test, args.snapshot_hours)
+    snap_of    = assign_snapshots(inter.time, boundaries)
 
-    # ── 3. HKG — load from cache or build ────────────────────────────────────
+    train_rows = inter.rows(SPLIT_TRAIN)
+    if args.warmup_hours > 0:
+        warm_end   = inter.time.min() + int(args.warmup_hours * 3_600_000)
+        train_rows = train_rows[inter.time[train_rows] >= warm_end]
+    val_rows   = inter.rows(SPLIT_VAL)
+    test_rows  = inter.rows(SPLIT_TEST)
+    tqdm.write(f"      {len(boundaries)} snapshot boundaries every {args.snapshot_hours:g}h  "
+               f"train rows={len(train_rows):,}")
+
+    # ── 3. Timed HKG — load from cache or build ──────────────────────────────
+    # Built once over the whole log with a timestamp on every behavioural
+    # edge; the model only ever sees time-filtered snapshots of it.
     tqdm.write("[3/5] Preparing HKG …")
     bundle: HKGBundle | None = None
     if cache_dir and not args.rebuild_hkg:
-        bundle = load_hkg(cache_dir)
+        bundle = load_hkg(cache_dir, data)
 
     if bundle is None:
-        tqdm.write("      No cache found — building from CSV files (this may take a while) …")
+        tqdm.write("      No valid cache — building from CSV files …")
         t0     = time.time()
-        bundle = HKGConstructor(data, device="cpu",
-                                max_seq_len=args.max_seq_len).build()
+        bundle = HKGConstructor(data, device="cpu").build()
         tqdm.write(f"      HKG built in {time.time()-t0:.1f}s")
         if cache_dir:
             save_hkg(bundle, cache_dir)
     else:
         tqdm.write(f"      Loaded from cache  n_videos={bundle.n_videos:,}  n_sessions={bundle.n_sessions:,}")
 
-    # Free large DataFrames — no longer needed after HKG is built
-    # log_standard alone is ~12 GB on 27K; freeing it here recovers
-    # that RAM for the HKG graph tensors and embedding matrices
+    if args.model_type == "single":
+        rel_builder = lambda b: build_full_relation_edge_index(b, torch.device("cpu"), args.max_edges)
+    else:
+        rel_builder = lambda b: build_relation_edge_index(b.structural_graph, torch.device("cpu"), args.max_edges)
+    needed = set(np.unique(snap_of[np.r_[train_rows, val_rows, test_rows]]).tolist())
+    t0 = time.time()
+    store = SnapshotStore(bundle, data, boundaries, rel_builder, needed=needed)
+    tqdm.write(f"      {len(needed)} snapshots prepared in {time.time()-t0:.1f}s")
+    batcher = PrefixBatcher(inter)
+
+    # Free large DataFrames — no longer needed once snapshots are prepared
     import gc
     data.log_standard  = None
     data.log_random    = None
     data.log_combined  = None
     data.session_map   = None
     gc.collect()
-
-    sg = bundle.structural_graph
-    qg = bundle.sequential_graph
-
-    # Build relation edge index ONCE — reused every epoch encode step
-    tqdm.write("      Building relation edge index …")
-    rel_ei, rel_t = build_relation_edge_index(sg, device, args.max_edges)
-    tqdm.write(f"      Relation edges: {rel_ei.shape[1]:,} ({rel_ei.shape[1]*8/1e6:.1f} MB on GPU)")
-
-    # Sequential session ids
-    seq_et  = ("video", "next_in_session", "video")
-    sess_id = qg[seq_et].session_id.to(device)
-    n_sess  = max(bundle.n_sessions, 1)
-
-    if device.type == "cuda":
-        logger.info(
-            "GPU memory after HKG setup: allocated=%.1f GB  reserved=%.1f GB",
-            torch.cuda.memory_allocated() / 1e9,
-            torch.cuda.memory_reserved()  / 1e9,
-        )
 
     # ── 4. Build model ────────────────────────────────────────────────────────
     tqdm.write(f"[4/5] Building model  (type={args.model_type}) …")
@@ -1269,10 +796,6 @@ def main() -> None:
         model = build_single_model(data, bundle, args.hidden_dim, args.out_dim, device,
                                    use_recency_gate=use_rg,
                                    num_layers=args.gnn_layers)
-        # Single model needs the full graph + full edge index
-        full_rel_ei, full_rel_t = build_full_relation_edge_index(
-            bundle, device, args.max_edges)
-        tqdm.write(f"      Full HKG edges: {full_rel_ei.shape[1]:,}")
     else:
         model = build_model(data, bundle, args.hidden_dim, args.out_dim, device,
                             kg_alignment=args.kg_alignment,
@@ -1284,6 +807,9 @@ def main() -> None:
             tqdm.write("WARNING: --multi-gpu requested but fewer than 2 GPUs found. "
                        "Falling back to single GPU.")
             args.multi_gpu = False
+        elif args.model_type == "single":
+            tqdm.write("WARNING: --multi-gpu applies to the dual model only; ignoring.")
+            args.multi_gpu = False
         else:
             model.split_across_gpus(
                 gpu_structural = args.gpu_structural,
@@ -1293,10 +819,9 @@ def main() -> None:
             tqdm.write(f"      Model split: structural→cuda:{args.gpu_structural}  "
                        f"sequential→cuda:{args.gpu_sequential}  "
                        f"head→cuda:{args.gpu_structural}")
-            # Rebuild rel_ei on gpu_structural, sess_id on gpu_sequential
-            rel_ei = rel_ei.to(f"cuda:{args.gpu_structural}")
-            rel_t  = rel_t.to(f"cuda:{args.gpu_structural}")
-            sess_id = sess_id.to(f"cuda:{args.gpu_sequential}")
+
+    split_kw = dict(snap_of=snap_of, store=store, batcher=batcher,
+                    model_type=args.model_type, use_amp=use_amp, no_ips=args.no_ips)
 
     # AMP scaler (no-op on non-CUDA)
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
@@ -1306,19 +831,16 @@ def main() -> None:
     out_dir = Path(args.output_dir) / make_run_name(args)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Load checkpoint if eval-only or if a prior run left one
+    # Checkpoints are only loaded for --eval-only; training always starts from
+    # fresh weights so a stale checkpoint from an earlier run cannot leak in.
     best_auc = 0.0
     ckpt_file = out_dir / _ckpt_filename(args.model_type)
-    if args.eval_only or ckpt_file.exists():
-        loaded_auc = load_checkpoint(model, device, out_dir, args.model_type)
-        if args.eval_only:
-            best_auc = loaded_auc
-
     if args.eval_only:
+        best_auc = load_checkpoint(model, device, out_dir, args.model_type)
         tqdm.write("--eval-only: skipping training, loading checkpoint.")
     else:
         # ── 5. Training loop ──────────────────────────────────────────────────
-        tqdm.write(f"[5/5] Training  ({len(train_loader):,} batches/epoch × {args.epochs} epochs) …")
+        tqdm.write(f"[5/5] Training  ({len(train_rows):,} rows/epoch × {args.epochs} epochs) …")
         optimizer = torch.optim.Adam(
             model.parameters(), lr=args.lr, weight_decay=args.weight_decay,
         )
@@ -1327,9 +849,6 @@ def main() -> None:
         )
 
         history: list[dict] = []
-        n_train_batches = len(train_loader)
-        n_test_batches  = len(test_loader)
-
         epoch_bar = tqdm(
             range(1, args.epochs + 1),
             desc          = "Training",
@@ -1342,33 +861,10 @@ def main() -> None:
             t0 = time.time()
             tqdm.write(f"\n── Epoch {epoch}/{args.epochs} ─────────────────────────────")
 
-            # Encode graph once — dispatch by model type and scale
-            if args.model_type == "single":
-                emb = _encode_single(model, bundle, full_rel_ei, full_rel_t, sess_id, device)
-            elif args.multi_gpu:
-                emb = encode_epoch_dual_gpu(
-                    model, sg, qg, rel_ei, rel_t, sess_id,
-                    chunk_size=args.chunk_size,
-                )
-            elif args.scale == "27k":
-                emb = encode_epoch_chunked(
-                    model, sg, qg, rel_ei, rel_t, sess_id, device,
-                    chunk_size=args.chunk_size,
-                )
-            else:
-                emb = encode_epoch(model, sg, qg, rel_ei, rel_t, sess_id, device)
-
-            train_m = run_epoch(
-                model, train_loader, emb, n_sess,
-                device, optimizer, scaler,
-                split="train", use_amp=use_amp, no_ips=args.no_ips,
-            )
-            test_m = run_epoch(
-                model, test_loader, emb, n_sess,
-                device, None, None,
-                split="test", use_amp=use_amp, no_ips=args.no_ips,
-            )
-            del emb   # free CPU embedding matrices between epochs
+            train_m = run_split(model, train_rows, batch_size=args.batch_size,
+                                optimizer=optimizer, scaler=scaler, split="train", **split_kw)
+            val_m   = run_split(model, val_rows, batch_size=args.batch_size * 2,
+                                optimizer=None, scaler=None, split="val", **split_kw)
             scheduler.step()
 
             elapsed = time.time() - t0
@@ -1382,27 +878,28 @@ def main() -> None:
             summary = (
                 f"  train  loss={train_m.loss:.4f}  AUC={train_m.auc:.4f}  "
                 f"AP={train_m.ap:.4f}  nDCG@10={train_m.ndcg10:.4f}\n"
-                f"  test   loss={test_m.loss:.4f}  AUC={test_m.auc:.4f}  "
-                f"AP={test_m.ap:.4f}  nDCG@10={test_m.ndcg10:.4f}\n"
+                f"  val    loss={val_m.loss:.4f}  AUC={val_m.auc:.4f}  "
+                f"AP={val_m.ap:.4f}  nDCG@10={val_m.ndcg10:.4f}\n"
                 f"  lr={lr_now:.2e}  elapsed={elapsed:.1f}s{gpu_str}"
             )
             tqdm.write(summary)
 
             epoch_bar.set_postfix({
                 "tr_auc": f"{train_m.auc:.4f}",
-                "te_auc": f"{test_m.auc:.4f}",
+                "va_auc": f"{val_m.auc:.4f}",
                 "loss":   f"{train_m.loss:.4f}",
             })
 
             history.append({
                 "epoch": epoch, "train": asdict(train_m),
-                "test":  asdict(test_m), "lr": lr_now, "time_s": round(elapsed, 2),
+                "val":   asdict(val_m), "lr": lr_now, "time_s": round(elapsed, 2),
             })
 
-            if test_m.auc > best_auc:
-                best_auc = test_m.auc
+            # Model selection on validation only — test is never consulted here
+            if val_m.auc > best_auc:
+                best_auc = val_m.auc
                 save_checkpoint(model, args, best_auc, out_dir)
-                tqdm.write(f"  ★ new best test AUC={best_auc:.4f}  (checkpoint saved)")
+                tqdm.write(f"  ★ new best val AUC={best_auc:.4f}  (checkpoint saved)")
 
         epoch_bar.close()
 
@@ -1410,72 +907,55 @@ def main() -> None:
         (out_dir / "history.json").write_text(json.dumps(history, indent=2))
         logger.info("Training history -> %s", out_dir / "history.json")
 
-    # ── 6. Final evaluation with best checkpoint ──────────────────────────────
+    # ── 6. Final evaluation with the val-selected checkpoint ─────────────────
     print()
-    tqdm.write("── Final evaluation (best checkpoint) ──────────────────────")
-    if cache_dir and ckpt_file and ckpt_file.exists():
-        load_checkpoint(model, device, cache_dir, args.model_type)
+    tqdm.write("── Final evaluation (val-selected checkpoint) ──────────────")
+    if ckpt_file.exists():
+        load_checkpoint(model, device, out_dir, args.model_type)
 
-    if args.model_type == "single":
-        emb_final = _encode_single(model, bundle, full_rel_ei, full_rel_t, sess_id, device)
-    elif args.multi_gpu:
-        emb_final = encode_epoch_dual_gpu(
-            model, sg, qg, rel_ei, rel_t, sess_id,
-            chunk_size=args.chunk_size,
-        )
-    elif args.scale == "27k":
-        emb_final = encode_epoch_chunked(
-            model, sg, qg, rel_ei, rel_t, sess_id, device,
-            chunk_size=args.chunk_size,
-        )
-    else:
-        emb_final = encode_epoch(model, sg, qg, rel_ei, rel_t, sess_id, device)
-
-    final_train = run_epoch(
-        model, train_loader, emb_final, n_sess,
-        device, None, None,
-        split="train", use_amp=use_amp, no_ips=args.no_ips,
-    )
-    final_test = run_epoch(
-        model, test_loader, emb_final, n_sess,
-        device, None, None,
-        split="test ", use_amp=use_amp, no_ips=args.no_ips,
-    )
-    del emb_final
+    final_train = run_split(model, train_rows, batch_size=args.batch_size * 2,
+                            optimizer=None, scaler=None, split="train", **split_kw)
+    final_val   = run_split(model, val_rows, batch_size=args.batch_size * 2,
+                            optimizer=None, scaler=None, split="val", **split_kw)
+    final_test  = run_split(model, test_rows, batch_size=args.batch_size * 2,
+                            optimizer=None, scaler=None, split="test", **split_kw)
 
     # ── 7. Print metrics table ────────────────────────────────────────────────
     print("\n" + "=" * 62)
     print(f"  CVR Metrics  —  KuaiRand-{args.scale.upper()}  [{args.model_type.upper()} GNN]")
     print("=" * 62)
-    hdr = f"  {'Metric':<12} {'Train':>10} {'Test':>10}"
+    hdr = f"  {'Metric':<12} {'Train':>10} {'Val':>10} {'Test':>10}"
     print(hdr)
     print("  " + "─" * (len(hdr) - 2))
-    for name, t_val, e_val in [
-        ("Loss",    final_train.loss,    final_test.loss),
-        ("AUC-ROC", final_train.auc,     final_test.auc),
-        ("AP",      final_train.ap,      final_test.ap),
-        ("LogLoss", final_train.logloss, final_test.logloss),
-        ("nDCG@10", final_train.ndcg10,  final_test.ndcg10),
+    for name, tr, va, te in [
+        ("Loss",    final_train.loss,    final_val.loss,    final_test.loss),
+        ("AUC-ROC", final_train.auc,     final_val.auc,     final_test.auc),
+        ("AP",      final_train.ap,      final_val.ap,      final_test.ap),
+        ("LogLoss", final_train.logloss, final_val.logloss, final_test.logloss),
+        ("nDCG@10", final_train.ndcg10,  final_val.ndcg10,  final_test.ndcg10),
     ]:
-        print(f"  {name:<12} {t_val:>10.4f} {e_val:>10.4f}")
+        print(f"  {name:<12} {tr:>10.4f} {va:>10.4f} {te:>10.4f}")
 
     print()
     print(f"  Train samples  : {final_train.n_samples:>12,}")
+    print(f"  Val   samples  : {final_val.n_samples:>12,}")
     print(f"  Test  samples  : {final_test.n_samples:>12,}")
     print(f"  Train pos rate : {final_train.n_pos / max(final_train.n_samples,1):>12.3f}")
+    print(f"  Val   pos rate : {final_val.n_pos   / max(final_val.n_samples, 1):>12.3f}")
     print(f"  Test  pos rate : {final_test.n_pos  / max(final_test.n_samples, 1):>12.3f}")
-    print(f"  Best test AUC  : {best_auc:>12.4f}")
+    print(f"  Best val AUC   : {best_auc:>12.4f}")
     print("=" * 62 + "\n")
 
     # ── 8. Save final metrics ─────────────────────────────────────────────────
-    # Include model_type in the directory so dual and single runs never collide
-    out_dir = Path(args.output_dir) / f"kuairand_{args.scale}_{args.model_type}"
-    out_dir.mkdir(parents=True, exist_ok=True)
+    # Same run-specific directory as history.json and the checkpoint
     (out_dir / "final_metrics.json").write_text(json.dumps({
         "train": asdict(final_train),
+        "val":   asdict(final_val),
         "test":  asdict(final_test),
         "args":  vars(args),
-        "best_auc": best_auc,
+        "best_val_auc": best_auc,
+        "t_val":  t_val,
+        "t_test": t_test,
     }, indent=2))
     logger.info("Final metrics -> %s", out_dir / "final_metrics.json")
     logger.info("Done.")

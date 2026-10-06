@@ -276,6 +276,46 @@ class SequentialGNN(nn.Module):
             "session": self.out_proj(session_emb),
         }
 
+    def item_hidden(self, graph: HeteroData) -> Tensor:
+        """
+        Gated propagation over next_in_session edges, returning pre-projection
+        item states [N_video, hidden_dim] — the inputs `prefix_readout` pools.
+        Same computation as the first half of `forward`.
+        """
+        dev = next(self.parameters()).device
+        edge_index = graph["video", "next_in_session", "video"].edge_index.to(dev)
+        h = F.relu(self.input_proj(graph["video"].x.to(dev)))
+        h = self.norm(self.ggnn(h, edge_index))
+        return F.dropout(h, p=self.dropout, training=self.training)
+
+    def prefix_readout(self, h_prefix: Tensor, mask: Tensor) -> Tensor:
+        """
+        Causal session embedding per interaction.
+
+        h_prefix : [B, L, hidden_dim]  states of the items seen earlier in the
+                   same session, right-aligned (most recent item at index -1)
+        mask     : [B, L] bool, True where a prefix item exists
+
+        Same attention + recency gate as `_session_readout`, but the query is
+        the most recent *earlier* item and the keys are only items before the
+        interaction being predicted.  Rows with an empty prefix get the same
+        zero vector `_session_readout` uses for sessions without edges.
+        Returns [B, out_dim].
+        """
+        has = mask.any(dim=1, keepdim=True)                       # [B, 1]
+        last_h = h_prefix[:, -1] * has                             # [B, H]
+        q      = self.attn_q(last_h).unsqueeze(1)                  # [B, 1, H]
+        k      = self.attn_k(h_prefix)                             # [B, L, H]
+        score  = self.attn_v(torch.tanh(q + k)).squeeze(-1)        # [B, L]
+        score  = score.masked_fill(~mask, float("-inf"))
+        alpha  = torch.softmax(score, dim=1).nan_to_num(0.0)       # empty rows → 0
+        session_emb = (alpha.unsqueeze(-1) * h_prefix).sum(1)      # [B, H]
+
+        if self.use_recency_gate:
+            gate        = torch.sigmoid(self.recency_gate(torch.cat([session_emb, last_h], dim=-1)))
+            session_emb = gate * session_emb + (1.0 - gate) * last_h
+        return self.out_proj(session_emb)
+
     def _session_readout(
         self,
         h:          Tensor,       # [N_video, hidden_dim]
@@ -450,7 +490,8 @@ class SingleHGT(nn.Module):
         full_graph:          "HeteroData",
         merged_edge_index:   Tensor,   # [2, E_all] all edge types merged, global offsets
         merged_edge_types:   Tensor,   # [E_all] type id per edge
-        session_id:          Tensor,   # [E_seq] session id per next_in_session edge
+        session_id:          Tensor | None = None,  # [E_seq] session id per next_in_session edge
+        with_sessions:       bool = True,
     ) -> dict[str, Tensor]:
         """
         Parameters
@@ -465,6 +506,8 @@ class SingleHGT(nn.Module):
         session_id : Tensor [E_seq]
             Session assignment for each next_in_session edge, used for
             the session-level readout.
+        with_sessions : bool
+            False skips the per-session readout ('session' is then absent).
 
         Returns
         -------
@@ -501,6 +544,9 @@ class SingleHGT(nn.Module):
         h_user_out  = self.user_out(h_all[:n_user])
         h_video_out = self.video_out(h_all[n_user: n_user + n_video])
         h_video_hidden = h_all[n_user: n_user + n_video]   # pre-projection, for session readout
+
+        if not with_sessions:
+            return {"user": h_user_out, "video": h_video_out}
 
         # Session readout using HGT-updated video embeddings
         seq_et     = ("video", "next_in_session", "video")

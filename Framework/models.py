@@ -363,64 +363,72 @@ class KuaiCVRModel(nn.Module):
         sequential_graph,
         relation_edge_index,
         relation_types,
-        session_id,
     ) -> dict[str, Tensor]:
         """
-        Run both GNNs once over the full graph and return embedding matrices.
+        Run both GNNs once over a graph snapshot and return embedding matrices.
 
-        Called once per epoch OUTSIDE the batch loop.  No gradients are kept
-        here — this is purely inference over the graph structure.  The returned
-        tensors live on the same device as the model parameters.
+        Called OUTSIDE the batch loop.  No gradients are kept here — the GNN
+        weights are never updated (frozen encoders, Algorithm 2).
+
+        Session embeddings are not produced here: they depend on which items
+        precede each interaction, so they are pooled per row in
+        forward_from_embeddings from 'q_hidden'.
 
         Returns
         -------
         dict with keys:
-            's_user'    : [N_users,    D]  structural user embeddings
-            's_video'   : [N_videos,   D]  structural video embeddings
-            'q_video'   : [N_videos,   D]  sequential video embeddings
-            'q_session' : [N_sessions, D]  sequential session embeddings
+            's_user'   : [N_users,  D]  structural user embeddings
+            's_video'  : [N_videos, D]  structural video embeddings
+            'q_video'  : [N_videos, D]  sequential video embeddings
+            'q_hidden' : [N_videos, H]  pre-projection sequential item states
         """
         struct_emb = self.structural_gnn(
             structural_graph, relation_edge_index, relation_types
         )
-        seq_emb = self.sequential_gnn(sequential_graph, session_id)
+        h = self.sequential_gnn.item_hidden(sequential_graph)
 
         return {
-            "s_user":    struct_emb["user"],
-            "s_video":   struct_emb["video"],
-            "q_video":   seq_emb["video"],
-            "q_session": seq_emb["session"],
+            "s_user":   struct_emb["user"],
+            "s_video":  struct_emb["video"],
+            "q_video":  self.sequential_gnn.out_proj(h),
+            "q_hidden": h,
         }
 
     def forward_from_embeddings(
         self,
-        emb:         dict[str, Tensor],  # from encode_graph
-        user_idx:    Tensor,             # [B]
-        video_idx:   Tensor,             # [B]
-        session_idx: Tensor,             # [B]
-        ips_weights: Tensor | None = None,
-        labels:      Tensor | None = None,
-        kg_relation: Tensor | None = None,
+        emb:          dict[str, Tensor],  # from encode_graph
+        user_idx:     Tensor,             # [B]
+        video_idx:    Tensor,             # [B]
+        prefix_items: Tensor,             # [B, L] video idx, -1 = padding
+        ips_weights:  Tensor | None = None,
+        labels:       Tensor | None = None,
+        kg_relation:  Tensor | None = None,
     ) -> dict[str, Tensor]:
         """
         Run only the alignment module and CVR head using pre-computed embeddings.
 
         Called inside the batch loop with gradients enabled.  Only the
-        alignment and head parameters receive gradients — the GNN weights
-        are updated implicitly because encode_graph is called with the live
-        model weights at the start of each epoch.
+        alignment and head parameters receive gradients; the GNN weights stay
+        at their initialisation.
 
         Parameters
         ----------
-        emb         : output of encode_graph (on device)
-        user_idx    : [B] indices into emb["s_user"]
-        video_idx   : [B] indices into emb["s_video"] and emb["q_video"]
-        session_idx : [B] indices into emb["q_session"]
+        emb          : output of encode_graph (on device)
+        user_idx     : [B] indices into emb["s_user"]
+        video_idx    : [B] indices into emb["s_video"] and emb["q_video"]
+        prefix_items : [B, L] videos seen earlier in the same session,
+                       right-aligned, -1 where there is none
         """
         h_s_user    = emb["s_user"][user_idx]
         h_s_video   = emb["s_video"][video_idx]
         h_q_video   = emb["q_video"][video_idx]
-        h_q_session = emb["q_session"][session_idx]
+
+        # Session readout belongs to the frozen sequential encoder
+        seq_dev = next(self.sequential_gnn.parameters()).device
+        with torch.no_grad():
+            mask     = (prefix_items >= 0).to(seq_dev)
+            h_prefix = emb["q_hidden"][prefix_items.clamp(min=0)].to(seq_dev)
+            h_q_session = self.sequential_gnn.prefix_readout(h_prefix, mask).to(h_q_video.device)
 
         fused  = self.alignment(h_s_user, h_s_video, h_q_video, h_q_session, kg_relation)
         logits = self.cvr_head(fused)
@@ -473,29 +481,32 @@ class SingleGNNModel(nn.Module):
         full_graph,
         merged_edge_index: Tensor,
         merged_edge_types:  Tensor,
-        session_id:         Tensor,
     ) -> dict[str, Tensor]:
         """
-        Run the HGT once and return full embedding matrices.
+        Run the HGT once over a graph snapshot and return embedding matrices.
+
+        The per-session readout is skipped: the CVR head reads only the user
+        and video embeddings.
 
         Returns
         -------
         dict with keys:
-            'user'    : [N_users,    out_dim]
-            'video'   : [N_videos,   out_dim]
-            'session' : [N_sessions, out_dim]
+            's_user'  : [N_users,  out_dim]
+            's_video' : [N_videos, out_dim]
         """
-        return self.hgt(full_graph, merged_edge_index, merged_edge_types, session_id)
+        out = self.hgt(full_graph, merged_edge_index, merged_edge_types,
+                       with_sessions=False)
+        return {"s_user": out["user"], "s_video": out["video"]}
 
     def forward_from_embeddings(
         self,
-        emb:         dict[str, Tensor],
-        user_idx:    Tensor,
-        video_idx:   Tensor,
-        session_idx: Tensor,
-        ips_weights: Tensor | None = None,
-        labels:      Tensor | None = None,
-        kg_relation: Tensor | None = None,   # unused, kept for API symmetry
+        emb:          dict[str, Tensor],
+        user_idx:     Tensor,
+        video_idx:    Tensor,
+        prefix_items: Tensor | None = None,   # unused, kept for API symmetry
+        ips_weights:  Tensor | None = None,
+        labels:       Tensor | None = None,
+        kg_relation:  Tensor | None = None,   # unused, kept for API symmetry
     ) -> dict[str, Tensor]:
         """
         Gather batch embeddings and run the CVR head.

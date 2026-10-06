@@ -1,6 +1,6 @@
 # HUG — Graph-based CVR Prediction with Heterogeneous Unified Knowledge Graphs
 
-A video recommendation system that predicts Click-Through Rate (CVR) on the [KuaiRand](https://kuairand.com/) dataset. Implements both baseline models (DIN, BST) and a novel **dual-GNN architecture** with Knowledge Graph alignment.
+A video recommendation system that predicts Click-Through Rate (CVR) on the [KuaiRand](https://kuairand.com/) dataset. Implements baseline models (TransAct, WuKong) and a novel **dual-GNN architecture** with Knowledge Graph alignment.
 
 ---
 
@@ -18,13 +18,9 @@ In the 2 GNN case:
 
 A **KG-guided cross-attention alignment module** fuses both representations before a final CVR classifier.
 
-| Model | Test AUC |
-|---|---|
-| DIN (baseline) | 0.6903 |
-| BST (baseline) | 0.7009 |
-| HUG-Unified | 0.7260 |
-| HUG-Dual (Knowledge Graph Alignment Off) | 0.7344 |
-| **HUG-Dual (Knowledge Graph Alignment On)** | **0.7398** |
+Results are being regenerated under the leak-free protocol (graph and item
+statistics built from the training window only; global chronological
+train/val/test split; model selection on validation). Earlier numbers are void.
 
 ---
 
@@ -40,13 +36,14 @@ HUG/
 │   ├── models.py           # AlignmentModule & CVRHead
 │   └── tests.py            # Unit tests
 │
-├── Baselines/              # FuxiCTR-based DIN & BST baselines
+├── Baselines/              # FuxiCTR-based TransAct & WuKong baselines
 │   ├── config/
 │   │   ├── dataset_config.yaml
 │   │   └── model_config.yaml
-│   ├── preprocess.py
-│   ├── train.py
-│   └── evaluate.py
+│   ├── setup_fuxictr.sh    # clones FuxiCTR at a pinned commit
+│   ├── preprocess.py       # same loader + split as Framework/
+│   ├── train.py            # train, select on val, evaluate with HUG metrics
+│   └── run_all.sh
 │
 ├── Plots/
 │   └── view_results.py     # Bar chart comparisons across models
@@ -118,7 +115,8 @@ python Framework/main.py \
 | `--no-amp` | `False` | Disable fp16 mixed precision |
 | `--eval-only` | `False` | Load checkpoint and evaluate only |
 | `--multi-gpu` | `False` | Split model across 2 GPUs |
-| `--test-ratio` | `0.2` | Fraction of data held out for testing |
+| `--val-ratio` | `0.1` | Fraction of data (by time) used for validation / model selection |
+| `--test-ratio` | `0.2` | Most recent fraction of data held out for testing |
 | `--max-seq-len` | `50` | Max session sequence length |
 | `--min-interactions` | `10` | Min interactions per user (cold-start filter) |
 
@@ -126,30 +124,27 @@ The HKG is built and serialized to `--cache-dir` on first run. Subsequent runs l
 
 ---
 
-## Training the Baselines (DIN / BST)
+## Training the Baselines (TransAct / WuKong)
 
 ```bash
-# Step 1 — preprocess (builds behavior sequences)
-python Baselines/preprocess.py
-
-# Step 2 — train
-python Baselines/train.py --model DIN --gpu 0
-python Baselines/train.py --model BST --gpu 0
-
-# Step 3 — evaluate
-python Baselines/evaluate.py --model both --gpu 0
+bash Baselines/setup_fuxictr.sh                 # clone FuxiCTR (pinned) + deps
+python Baselines/preprocess.py                  # same rows and split as Framework/
+python Baselines/train.py --model all --gpu 0   # or --model TransAct / WuKong
 ```
 
-Hyperparameters are in [`Baselines/config/model_config.yaml`](Baselines/config/model_config.yaml). See [`Baselines/BASELINE_STEPS.md`](Baselines/BASELINE_STEPS.md) for a full walkthrough.
+Or all three steps: `bash Baselines/run_all.sh 0`. Hyperparameters are in
+[`Baselines/config/model_config.yaml`](Baselines/config/model_config.yaml).
+Metrics land in `runs/<Model>/final_metrics.json`, computed with the same
+code as HUG.
 
 ---
 
 ## Outputs
 
-Results are saved under `runs/kuairand_<scale>_<model_type>/`:
+Results are saved under `runs/<run_name>/` (see `make_run_name` in `main.py`):
 
-- **`final_metrics.json`** — best-checkpoint evaluation
-- **`history.json`** — per-epoch metrics (AUC, AP, LogLoss, nDCG@10, training time)
+- **`final_metrics.json`** — train / val / test metrics of the val-selected checkpoint
+- **`history.json`** — per-epoch train and validation metrics (AUC, AP, LogLoss, nDCG@10, training time)
 
 Example:
 

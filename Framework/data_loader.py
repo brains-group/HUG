@@ -103,6 +103,9 @@ class KuaiRandData:
     log_combined:      pd.DataFrame = field(default_factory=pd.DataFrame)
     session_map:       pd.DataFrame = field(default_factory=pd.DataFrame)  # interaction → session_id
 
+    # Total session count over the full log
+    n_sessions:        int = 0
+
     # Re-indexed id maps (str → contiguous int)
     user_id_map:       dict = field(default_factory=dict)
     video_id_map:      dict = field(default_factory=dict)
@@ -173,7 +176,6 @@ class KuaiRandLoader:
         log_rand  = self._load_logs(standard=False)
         user_feat = self._load_user_features()
         vid_basic = self._load_video_basic()
-        vid_stat  = self._load_video_statistic()
 
         if self.filter_ads:
             ad_ids   = set(vid_basic.loc[vid_basic["video_type"] == "AD", "video_id"])
@@ -191,9 +193,14 @@ class KuaiRandLoader:
             log_random      = log_rand,
             user_features   = user_feat,
             video_basic     = vid_basic,
-            video_statistic = vid_stat,
+            # Item statistics are computed per time window from the logs
+            # (compute_video_statistics).  The shipped
+            # video_features_statistic_*.csv aggregates the whole collection
+            # period (incl. the test window), so it is deliberately not read.
+            video_statistic = pd.DataFrame(),
             log_combined    = log_combined,
             session_map     = session_map,
+            n_sessions      = int(session_map["session_id"].max()) + 1 if len(session_map) else 0,
         )
 
         data.user_id_map     = self._build_id_map(data.user_features["user_id"])
@@ -213,7 +220,6 @@ class KuaiRandLoader:
         required = (
             f["log_std_early"] + f["log_std_late"] + f["log_random"]
             + [f["user"], f["video_basic"]]
-            + f["video_stat"]
         )
         missing = [fn for fn in required if not (self.data_dir / fn).exists()]
         if missing:
@@ -331,48 +337,6 @@ class KuaiRandLoader:
 
         return df
 
-    def _load_video_statistic(self) -> pd.DataFrame:
-        parts = self._files["video_stat"]
-
-        # Read column names from first part to determine what exists
-        first_header = pd.read_csv(
-            self.data_dir / parts[0], nrows=0
-        ).columns.tolist()
-
-        # Only keep columns we actually use downstream
-        stat_cols = [
-            "video_id", "show_cnt", "valid_play_cnt", "play_cnt",
-            "like_cnt", "follow_cnt", "share_cnt", "collect_cnt", "comment_cnt",
-        ]
-        usecols = [c for c in stat_cols if c in first_header]
-
-        chunks = []
-        for fname in parts:
-            logger.info("Reading %s …", fname)
-            part = pd.read_csv(
-                self.data_dir / fname,
-                usecols=usecols,
-                dtype={"video_id": np.int32},
-                low_memory=False,
-            )
-            chunks.append(part)
-
-        df = pd.concat(chunks, ignore_index=True) if len(chunks) > 1 else chunks[0]
-        del chunks
-
-        # Global CVR prior: valid plays / shows
-        df["global_cvr"] = (
-            df["valid_play_cnt"] / df["show_cnt"].replace(0, np.nan)
-        ).clip(0, 1).fillna(0).astype(np.float32)
-
-        # Log-transform skewed popularity counts
-        for col in ["show_cnt", "play_cnt", "like_cnt", "follow_cnt",
-                    "share_cnt", "collect_cnt", "comment_cnt"]:
-            if col in df.columns:
-                df[f"{col}_log"] = np.log1p(df[col].fillna(0)).astype(np.float32)
-
-        return df
-
     def _filter_active_users(self, log: pd.DataFrame) -> pd.DataFrame:
         counts = log["user_id"].value_counts()
         active = counts[counts >= self.min_interactions].index
@@ -415,3 +379,77 @@ class KuaiRandLoader:
         for tag_list in video_basic["tag_list"]:
             all_tags.update(tag_list)
         return {tag: idx for idx, tag in enumerate(sorted(all_tags))}
+
+# ── Chronological split + item statistics ─────────────────────────────────────
+# Shared by Framework/main.py and Baselines/preprocess.py so every model is
+# trained and evaluated on identical rows.
+
+SPLIT_TRAIN, SPLIT_VAL, SPLIT_TEST = 0, 1, 2
+
+
+def chronological_cutoffs(
+    time_ms:    np.ndarray,
+    val_ratio:  float = 0.1,
+    test_ratio: float = 0.2,
+) -> tuple[int, int]:
+    """
+    Global time cutoffs (t_val, t_test) such that roughly the earliest
+    1-val_ratio-test_ratio of interactions fall in train, the next val_ratio
+    in validation and the most recent test_ratio in test.
+
+    Rows are assigned by timestamp, not position, so interactions sharing a
+    timestamp never straddle a boundary.
+    """
+    t = np.sort(np.asarray(time_ms))
+    n = len(t)
+    t_val  = int(t[int(n * (1.0 - val_ratio - test_ratio))])
+    t_test = int(t[int(n * (1.0 - test_ratio))])
+    if not t_val < t_test:
+        raise ValueError(f"Degenerate split: t_val={t_val} t_test={t_test}")
+    return t_val, t_test
+
+
+def assign_split(time_ms: np.ndarray, t_val: int, t_test: int) -> np.ndarray:
+    """SPLIT_TRAIN if t < t_val, SPLIT_VAL if t_val <= t < t_test, else SPLIT_TEST."""
+    t = np.asarray(time_ms)
+    split = np.full(len(t), SPLIT_TRAIN, dtype=np.int8)
+    split[t >= t_val]  = SPLIT_VAL
+    split[t >= t_test] = SPLIT_TEST
+    return split
+
+
+def compute_video_statistics(log: pd.DataFrame) -> pd.DataFrame:
+    """
+    Per-video popularity statistics computed from an interaction log.
+
+    Replaces video_features_statistic_*.csv, which covers the full collection
+    period.  Column names match the old file so downstream code is unchanged;
+    collect_cnt has no log counterpart and is dropped.
+
+        show_cnt        exposures            valid_play_cnt  long_view == 1
+        play_cnt        is_click == 1        like_cnt        is_like == 1
+        follow_cnt      is_follow == 1       share_cnt       is_forward == 1
+        comment_cnt     is_comment == 1
+    """
+    g = log.groupby("video_id")
+    df = pd.DataFrame({
+        "show_cnt":       g.size(),
+        "valid_play_cnt": g["long_view"].sum(),
+        "play_cnt":       g["is_click"].sum(),
+        "like_cnt":       g["is_like"].sum(),
+        "follow_cnt":     g["is_follow"].sum(),
+        "share_cnt":      g["is_forward"].sum(),
+        "comment_cnt":    g["is_comment"].sum(),
+    }).reset_index()
+
+    # Global CVR prior: valid plays / shows
+    df["global_cvr"] = (
+        df["valid_play_cnt"] / df["show_cnt"].replace(0, np.nan)
+    ).clip(0, 1).fillna(0).astype(np.float32)
+
+    # Log-transform skewed popularity counts
+    for col in ["show_cnt", "play_cnt", "like_cnt", "follow_cnt",
+                "share_cnt", "comment_cnt"]:
+        df[f"{col}_log"] = np.log1p(df[col]).astype(np.float32)
+
+    return df

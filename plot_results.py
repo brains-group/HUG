@@ -69,10 +69,8 @@ ALL_METRICS = [
 
 GROUPS: dict[str, list[tuple[str, str]]] = {
     "baselines_progression": [
-        ("DIN",                               "DIN"),
-        ("BST",                               "BST"),
-        ("1k_kgat_ips0_L2_h128d64",          "KGAT\n(no SW)"),
-        ("1k_kgat_ips1_L2_h128d64",          "KGAT\n(SW)"),
+        ("TransAct",                          "TransAct"),
+        ("WuKong",                            "WuKong"),
         ("1k_single_kg0_ips1_rg1",           "HUG-Unified"),
         ("1k_dual_kg0_ips1_rg1",             "HUG-Dual\n(KGA off)"),
         ("1k_dual_kg64_ips1_rg1",            "HUG-Dual\n(full model)"),
@@ -97,13 +95,11 @@ GROUPS: dict[str, list[tuple[str, str]]] = {
 NDCG_EPOCH_RUNS: list[tuple[str, str]] = [
     ("1k_dual_kg128_ips1_rg1_h256d128",      "HUG-Dual"),
     ("1k_single_kg0_ips0_rg1",               "HUG-Unified"),
-    ("1k_kgat_ips0_L2_h128d64",              "KGAT"),
 ]
 
 NDCG_EPOCH_COLOURS: dict[str, str] = {
     "1k_dual_kg128_ips1_rg1_h256d128":       "#2CA02C",
     "1k_single_kg0_ips0_rg1":                "#4C72B0",
-    "1k_kgat_ips0_L2_h128d64":               "#DD8452",
 }
 
 GROUP_TITLES = {
@@ -118,12 +114,10 @@ OUTPUT_FILES = {
     "sensitivity":           "fig3_sensitivity.pdf",
 }
 
-# Grey for external/KGAT baselines; distinct colours for HUG variants
+# Grey for external baselines; distinct colours for HUG variants
 RUN_COLOURS: dict[str, str] = {
-    "DIN":                               "#8C8C8C",
-    "BST":                               "#8C8C8C",
-    "1k_kgat_ips0_L2_h128d64":          "#AAAAAA",
-    "1k_kgat_ips1_L2_h128d64":          "#4D4D4D",
+    "TransAct":                          "#8C8C8C",
+    "WuKong":                            "#4D4D4D",
     "1k_single_kg0_ips0_rg1":           "#4C72B0",
     "1k_single_kg0_ips1_rg1":           "#4C72B0",
     "1k_dual_kg0_ips1_rg1":             "#DD8452",
@@ -164,14 +158,13 @@ def _parse_log(log_path: Path) -> dict | None:
 
 
 def load_results(runs_dir: Path) -> dict[str, dict]:
-    """Return {run_name: metrics} using the final (last) test epoch."""
+    """Return {run_name: test metrics} from final_metrics.json (val-selected checkpoint)."""
     results = {}
 
-    for path in sorted(runs_dir.glob("*/history.json")):
+    for path in sorted(runs_dir.glob("*/final_metrics.json")):
         run_name = path.parent.name
         try:
-            history = json.loads(path.read_text())
-            test = [ep for ep in history if "test" in ep][-1]["test"]
+            test = json.loads(path.read_text())["test"]
             results[run_name] = {
                 "auc":     test.get("auc"),
                 "ap":      test.get("ap"),
@@ -333,8 +326,8 @@ def plot_ndcg_over_epochs(
         history = histories.get(run_name)
         if not history:
             continue
-        epochs = [ep["epoch"]          for ep in history if "test" in ep]
-        ndcg   = [ep["test"]["ndcg10"] for ep in history if "test" in ep]
+        epochs = [ep["epoch"]         for ep in history if "val" in ep]
+        ndcg   = [ep["val"]["ndcg10"] for ep in history if "val" in ep]
         colour = NDCG_EPOCH_COLOURS.get(
             run_name, RUN_COLOURS.get(run_name, COLOUR_DEFAULT)
         )
@@ -354,7 +347,7 @@ def plot_ndcg_over_epochs(
         )
 
     ax.set_xlabel("Epoch")
-    ax.set_ylabel("Test NDCG@10")
+    ax.set_ylabel("Validation NDCG@10")
     ax.legend(loc="center right", frameon=True)
     ax.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
     save_fig(fig, out_path)
@@ -380,8 +373,8 @@ def plot_convergence_curves(
             history = histories.get(run_name)
             if not history:
                 continue
-            epochs = [ep["epoch"]                    for ep in history if "test" in ep]
-            vals   = [ep["test"].get(metric_key, None) for ep in history if "test" in ep]
+            epochs = [ep["epoch"]                   for ep in history if "val" in ep]
+            vals   = [ep["val"].get(metric_key, None) for ep in history if "val" in ep]
             if any(v is None for v in vals):
                 continue
             ax.plot(epochs, vals, marker="o", markersize=5, linewidth=2.2,

@@ -2,11 +2,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 # Data from latest logs
-models = ['DIN', 'BST', 'HUG-Unified', 'HUG-Dual (KGA Off)', 'HUG-Dual (KGA On)']
-auc = [0.6903, 0.7009, 0.7260, 0.7344, 0.7398]
-ap = [0.5392, 0.5443, 0.6001, 0.6114, 0.6225]
-loss = [0.6000, 0.5924, 0.5849, 0.5760, 0.5737]
-ndcg = [0.7065, 0.8553, 1.0000, 0.9515, 1.0000]
+models = ['HUG-Unified', 'HUG-Dual (KGA Off)', 'HUG-Dual (KGA On)']
+auc = [0.7260, 0.7344, 0.7398]
+ap = [0.6001, 0.6114, 0.6225]
+loss = [0.5849, 0.5760, 0.5737]
+ndcg = [1.0000, 0.9515, 1.0000]
 
 # --- Larger publication-ready styling ---
 plt.rcParams.update({
@@ -27,8 +27,6 @@ width = 0.35
 
 # Baselines grey, ours colored
 model_colors = [
-    '#8C8C8C',  # DIN
-    '#8C8C8C',  # BST
     '#4C72B0',  # HUG-Unified
     '#55A868',  # HUG-Dual (KGA Off)
     '#2CA02C'   # HUG-Dual (KGA On)

@@ -1,69 +1,69 @@
 # config/dataset_config.yaml
 # ─────────────────────────────────────────────────────────────
-# FuxiCTR dataset configuration for KuaiRand-1K
-# Used by both DIN and BST experiments.
+# FuxiCTR dataset configuration for KuaiRand-1K.
+# Files are produced by Baselines/preprocess.py, which uses HUG's loader and
+# global chronological split, so rows match Framework/main.py exactly.
+#
+# Two dataset ids over the same files:
+#   kuairand_1k_seq  hist_video_ids kept as a sequence      → TransAct
+#   kuairand_1k      hist_video_ids mean-pooled by FuxiCTR → WuKong
 # ─────────────────────────────────────────────────────────────
 
-kuairand_1k:
-    data_root: /home/dasgua3/GCIC/Baselines/data/processed/
+kuairand_1k_seq:
+    data_root: /home/dasgua3/HUG/Baselines/data/processed/
     data_format: csv
-    train_data: /home/dasgua3/GCIC/Baselines/data/processed/kuairand_1k/train.csv
-    valid_data: /home/dasgua3/GCIC/Baselines/data/processed/kuairand_1k/valid.csv
-    test_data:  /home/dasgua3/GCIC/Baselines/data/processed/kuairand_1k/test.csv
-    min_categr_count: 2        # drop tokens seen < 2 times → maps to OOV
+    train_data: /home/dasgua3/HUG/Baselines/data/processed/kuairand_1k/train.csv
+    valid_data: /home/dasgua3/HUG/Baselines/data/processed/kuairand_1k/valid.csv
+    test_data: /home/dasgua3/HUG/Baselines/data/processed/kuairand_1k/test.csv
+    min_categr_count: 2        # tokens seen < 2 times in train → OOV
 
     feature_cols:
-        # ── User features ────────────────────────────────────
-        - {name: user_id,
+        # ── User ─────────────────────────────────────────────
+        - {name: user_id, active: True, dtype: str, type: categorical}
+        - {name: [user_active_degree, is_lowactive_period, is_live_streamer, is_video_author, follow_user_num_range, fans_user_num_range, friend_user_num_range, register_days_range, onehot_feat0, onehot_feat1, onehot_feat2, onehot_feat3, onehot_feat4, onehot_feat5, onehot_feat6, onehot_feat7, onehot_feat8, onehot_feat9, onehot_feat10, onehot_feat11, onehot_feat12, onehot_feat13, onehot_feat14, onehot_feat15, onehot_feat16, onehot_feat17],
            active: True, dtype: str, type: categorical}
-
-        - {name: user_active_degree,
+        # ── Item ─────────────────────────────────────────────
+        - {name: video_id, active: True, dtype: str, type: categorical}
+        - {name: [author_id, music_id, music_type, upload_type, primary_tag],
            active: True, dtype: str, type: categorical}
-
-        - {name: follow_user_num_range,
-           active: True, dtype: str, type: categorical}
-
-        - {name: fans_user_num_range,
-           active: True, dtype: str, type: categorical}
-
-        - {name: friend_user_num_range,
-           active: True, dtype: str, type: categorical}
-
-        - {name: register_days_range,
-           active: True, dtype: str, type: categorical}
-
-        # ── Item (video) features ────────────────────────────
-        - {name: video_id,
-           active: True, dtype: str, type: categorical}
-
-        - {name: author_id,
-           active: True, dtype: str, type: categorical}
-
-        - {name: music_id,
-           active: True, dtype: str, type: categorical}
-
-        - {name: upload_type,
-           active: True, dtype: str, type: categorical}
-
-        - {name: duration_ms,
-           active: True, dtype: float, type: numeric,
-           normalizer: MinMaxScaler}
-
+        # Item statistics as of each row: strictly earlier interactions only
+        - {name: [duration_s, global_cvr, show_cnt_log, play_cnt_log, like_cnt_log, follow_cnt_log, share_cnt_log, comment_cnt_log],
+           active: True, dtype: float, type: numeric, normalizer: StandardScaler}
         # ── Context ──────────────────────────────────────────
-        - {name: timestamp_norm,
-           active: True, dtype: float, type: numeric}
+        - {name: [tab, hour], active: True, dtype: str, type: categorical}
+        # ── Behaviour: last 50 clicked videos strictly before this row ──
+        - {name: hist_video_ids, active: True, dtype: str, type: sequence,
+           splitter: " ", max_len: 50, padding: pre,
+           feature_encoder: null,     # TransAct attends over the raw sequence
+           share_embedding: video_id}
 
-        # ── Behaviour sequence  (KEY for DIN / BST) ──────────
-        # Shares the embedding table with the target `video_id`
-        # so attention can compare history tokens to the target.
-        - {name: hist_video_ids,
-           active: True,
-           dtype: str,
-           type: sequence,
-           splitter: " ",
-           max_len: 50,
-           padding: pre,             # pad/truncate from the left
-           feature_encoder: null,    # DIN/BST apply their own pooling; null disables pre-pooling
+    label_col: {name: is_click, dtype: float}
+
+kuairand_1k:
+    data_root: /home/dasgua3/HUG/Baselines/data/processed/
+    data_format: csv
+    train_data: /home/dasgua3/HUG/Baselines/data/processed/kuairand_1k/train.csv
+    valid_data: /home/dasgua3/HUG/Baselines/data/processed/kuairand_1k/valid.csv
+    test_data: /home/dasgua3/HUG/Baselines/data/processed/kuairand_1k/test.csv
+    min_categr_count: 2        # tokens seen < 2 times in train → OOV
+
+    feature_cols:
+        # ── User ─────────────────────────────────────────────
+        - {name: user_id, active: True, dtype: str, type: categorical}
+        - {name: [user_active_degree, is_lowactive_period, is_live_streamer, is_video_author, follow_user_num_range, fans_user_num_range, friend_user_num_range, register_days_range, onehot_feat0, onehot_feat1, onehot_feat2, onehot_feat3, onehot_feat4, onehot_feat5, onehot_feat6, onehot_feat7, onehot_feat8, onehot_feat9, onehot_feat10, onehot_feat11, onehot_feat12, onehot_feat13, onehot_feat14, onehot_feat15, onehot_feat16, onehot_feat17],
+           active: True, dtype: str, type: categorical}
+        # ── Item ─────────────────────────────────────────────
+        - {name: video_id, active: True, dtype: str, type: categorical}
+        - {name: [author_id, music_id, music_type, upload_type, primary_tag],
+           active: True, dtype: str, type: categorical}
+        # Item statistics as of each row: strictly earlier interactions only
+        - {name: [duration_s, global_cvr, show_cnt_log, play_cnt_log, like_cnt_log, follow_cnt_log, share_cnt_log, comment_cnt_log],
+           active: True, dtype: float, type: numeric, normalizer: StandardScaler}
+        # ── Context ──────────────────────────────────────────
+        - {name: [tab, hour], active: True, dtype: str, type: categorical}
+        # ── Behaviour: last 50 clicked videos strictly before this row ──
+        - {name: hist_video_ids, active: True, dtype: str, type: sequence,
+           splitter: " ", max_len: 50, padding: pre,
            share_embedding: video_id}
 
     label_col: {name: is_click, dtype: float}
