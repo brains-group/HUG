@@ -10,7 +10,7 @@
 #   ln -s ~/HUG/KuaiRand-1K ~/HUG-heavy/KuaiRand-1K
 #   tmux new -s heavy 'cd ~/HUG-heavy && scripts/launch_stage1a.sh; exec bash'
 #
-# Stage 1a = tune_hug_N4, tune_hug_N1 and the four baseline tunings (16 trials each, val only).
+# Stage 1a = tune_hug_N4, tune_hug_N1 and the four baseline tunings (12 trials each, val only).
 # Every step logs to runs/heavy/launcher.log; any failed check stops before the queue starts.
 # Re-running is safe: finished jobs and trials are skipped by config hash (docs/HEAVY_RUN.md).
 #

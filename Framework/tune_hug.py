@@ -30,7 +30,9 @@ ROOT = Path(__file__).resolve().parents[1]
 
 # Spec 03 tuning space + spec 04 additions; graph keys apply to graph arms only
 SPACE = {
-    "emb_dim":      [32, 64, 128],
+    # 128 dropped: on KuaiRand-1K (5.8M graph nodes) emb_dim 128 needs 77 GB (2 layers) to
+    # >80 GB (3 layers) and OOMs on the shared H100s; 64 with 2 layers peaks at 38.4 GB
+    "emb_dim":      [32, 64],
     "min_id_count": [2, 5, 10],
     "seq_layers":   [1, 2],
     "dropout":      [0.0, 0.1, 0.2],

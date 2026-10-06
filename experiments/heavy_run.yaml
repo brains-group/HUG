@@ -46,40 +46,40 @@ defaults:
     tune_baseline: "--trials 1"
 
 jobs:
-  # ── Stage 1a: tuning (16 trials each, val only) ──
+  # ── Stage 1a: tuning (12 trials each, equal budgets, val only) ──
   - name: tune_hug_N4
     kind: tune_hug
-    args: "--arm N4 --trials 16 --seed 0"
+    args: "--arm N4 --trials 12 --seed 0"
     memory: heavy
     group: tune_hug_N4
     depends_on: []
   - name: tune_hug_N1
     kind: tune_hug
-    args: "--arm N1 --trials 16 --seed 0"
+    args: "--arm N1 --trials 12 --seed 0"
     memory: heavy
     group: tune_hug_N1
     depends_on: []
   - name: tune_baseline_TransAct
     kind: tune_baseline
-    args: "--model TransAct --trials 16 --seed 0"
+    args: "--model TransAct --trials 12 --seed 0"
     memory: light
     group: tune_TransAct
     depends_on: []
   - name: tune_baseline_WuKong
     kind: tune_baseline
-    args: "--model WuKong --trials 16 --seed 0"
+    args: "--model WuKong --trials 12 --seed 0"
     memory: light
     group: tune_WuKong
     depends_on: []
   - name: tune_baseline_FiGNN
     kind: tune_baseline
-    args: "--model FiGNN --trials 16 --seed 0"
+    args: "--model FiGNN --trials 12 --seed 0"
     memory: light
     group: tune_FiGNN
     depends_on: []
   - name: tune_baseline_DCNv2
     kind: tune_baseline
-    args: "--model DCNv2 --trials 16 --seed 0"
+    args: "--model DCNv2 --trials 12 --seed 0"
     memory: light
     group: tune_DCNv2
     depends_on: []
