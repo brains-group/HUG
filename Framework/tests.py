@@ -1189,126 +1189,45 @@ class TestRealData:
     # ── Phase 3: Model forward + backward on real embeddings ──────────────────
 
     def test_real_model_forward_backward(self, real_bundle, real_data, device):
-        """One forward + backward step using real graph dimensions and the target device."""
-        sg = real_bundle.structural_graph
-        qg = real_bundle.sequential_graph
+        """
+        One training step through the pipeline's own path at real dimensions:
+        build_model -> encode_graph on the t_val snapshot (reverse relations,
+        subsampled for speed) -> forward_from_embeddings with real causal
+        session prefixes -> backward.
+        """
+        import main as pipeline
 
-        user_cont_cols = [
-            c for c in real_data.user_features.columns
-            if c.endswith("_log") or c in (
-                "activity_level", "is_lowactive_period",
-                "is_live_streamer", "is_video_author",
-            )
-        ]
-        user_cont_dim  = len(user_cont_cols)
-        video_feat_dim = sg["video"].x.shape[1]
-        D = 32
-
-        # Infer actual onehot vocab sizes from real data — do NOT hardcode.
-        # Each onehot_featN column may have a different max value in the real dataset.
-        onehot_cols   = [f"onehot_feat{i}" for i in range(18)
-                         if f"onehot_feat{i}" in real_data.user_features.columns]
-        onehot_vocabs = [
-            int(real_data.user_features[col].max()) + 1
-            for col in onehot_cols
-        ]
-
-        struct = StructuralGNN(
-            user_cont_dim     = user_cont_dim,
-            user_onehot_vocab = onehot_vocabs,
-            video_feat_dim    = video_feat_dim,
-            n_authors         = real_bundle.n_authors,
-            n_categories      = real_bundle.n_categories,
-            hidden_dim        = 64,
-            out_dim           = D,
-            num_relations     = 7,
-            num_layers        = 2,
-        )
-        seq = SequentialGNN(
-            video_feat_dim = video_feat_dim,
-            hidden_dim     = 64,
-            out_dim        = D,
-            num_layers     = 2,
-        )
-        align = AlignmentModule(emb_dim=D, kg_relation_dim=0, num_heads=4)
-        head  = CVRHead(fused_dim=D, hidden_dims=[64, 32])
-        model = KuaiCVRModel(struct, seq, align, head).to(device)
+        model = pipeline.build_model(real_data, real_bundle, hidden_dim=64, out_dim=32,
+                                     device=device, num_layers=2)
         model.train()
-
         optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 
-        # Build merged relation edge index for R-GCN, moved to device
-        n_user   = sg["user"].num_nodes
-        n_video  = sg["video"].num_nodes
-        offsets  = {"user": 0, "video": n_user, "author": n_user + n_video}
+        ei, et, _ = pipeline.build_relation_edge_index(real_bundle.structural_graph)
+        idx = torch.randperm(ei.shape[1])[:20_000]
+        emb = model.encode_graph(real_bundle.structural_graph, real_bundle.sequential_graph,
+                                 ei[:, idx].to(device), et[idx].to(device))
 
-        rel_parts, rel_type_parts = [], []
-        rel_map = {
-            ("user",  "clicked",    "video"): 0,
-            ("user",  "liked",      "video"): 1,
-            ("user",  "hated",      "video"): 2,
-            ("user",  "commented",  "video"): 3,
-            ("user",  "forwarded",  "video"): 4,
-            ("video", "made_by",    "author"): 5,
-            ("video", "tagged_as",  "category"): 6,
-        }
-        for et, rel_id in rel_map.items():
-            if et not in sg.edge_types:
-                continue
-            ei      = sg[et].edge_index.cpu()   # start on CPU for indexing
-            shifted = ei.clone()
-            shifted[0] += offsets.get(et[0], 0)
-            shifted[1] += offsets.get(et[2], n_user + n_video)
-            if shifted.shape[1] > 2000:
-                idx     = torch.randperm(shifted.shape[1])[:2000]
-                shifted = shifted[:, idx]
-            rel_parts.append(shifted)
-            rel_type_parts.append(torch.full((shifted.shape[1],), rel_id, dtype=torch.long))
+        inter = build_interactions(real_data, max_prefix=50)
+        rows  = np.random.default_rng(0).choice(inter.rows(SPLIT_TRAIN), size=64, replace=False)
+        batch = {k: v.to(device) for k, v in PrefixBatcher(inter)(rows).items()}
+        assert (batch["prefix_items"] >= 0).any(), "sampled rows have no session prefixes"
 
-        if rel_parts:
-            rel_ei = torch.cat(rel_parts,      dim=1).to(device)
-            rel_t  = torch.cat(rel_type_parts, dim=0).to(device)
-        else:
-            rel_ei = torch.zeros(2, 0, dtype=torch.long, device=device)
-            rel_t  = torch.zeros(0, dtype=torch.long, device=device)
-
-        # Real sequential edges — already on device from HKGConstructor
-        seq_et  = ("video", "next_in_session", "video")
-        sess_id = qg[seq_et].session_id.to(device)
-        n_sess  = max(real_bundle.n_sessions, 1)
-
-        B = 16
-        out = model(
-            structural_graph    = sg,
-            sequential_graph    = qg,
-            relation_edge_index = rel_ei,
-            relation_types      = rel_t,
-            session_id          = sess_id,
-            user_idx            = torch.randint(0, real_bundle.n_users,  (B,), device=device),
-            video_idx           = torch.randint(0, real_bundle.n_videos, (B,), device=device),
-            session_idx         = torch.randint(0, n_sess, (B,), device=device),
-            kg_relation         = None,
-            ips_weights         = torch.ones(B, device=device),
-            labels              = torch.randint(0, 2, (B,), device=device),
-        )
-
+        out = model.forward_from_embeddings(
+            emb, batch["user_idx"], batch["video_idx"], batch["prefix_items"],
+            ips_weights=batch["ips_weight"], labels=batch["label"])
         optimizer.zero_grad()
         out["loss"].backward()
         optimizer.step()
 
         assert torch.isfinite(out["loss"]), f"Loss is not finite: {out['loss']}"
-        assert out["proba"].shape == (B,)
+        assert out["proba"].shape == (64,)
         assert out["proba"].min() >= 0.0 and out["proba"].max() <= 1.0
 
-        grad_norms = [
-            p.grad.norm().item()
-            for p in model.parameters()
-            if p.requires_grad and p.grad is not None
-        ]
-        assert len(grad_norms) > 0, "No gradients computed"
-        assert all(torch.isfinite(torch.tensor(g)) for g in grad_norms), (
-            "Non-finite gradients found"
-        )
+        grads = [p.grad for p in model.parameters() if p.grad is not None]
+        assert grads, "No gradients computed"
+        assert all(torch.isfinite(g).all() for g in grads), "Non-finite gradients found"
+        # encoders are frozen: encode_graph runs under no_grad
+        assert all(p.grad is None for p in model.structural_gnn.parameters())
 
     def test_real_no_test_pair_in_graph(self, real_data, real_bundle, real_cutoffs):
         """Sample 1000 test pairs never seen before the cutoff; none may be graph edges."""
