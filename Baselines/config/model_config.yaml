@@ -2,8 +2,8 @@
 # ─────────────────────────────────────────────────────────────
 # FuxiCTR model configurations for the KuaiRand-1K baselines.
 # Run with:
-#   python Baselines/train.py --model TransAct --gpu 0
-#   python Baselines/train.py --model WuKong   --gpu 0
+#   python Baselines/train.py --model TransAct --gpu 0 --run-dir runs/dev/TransAct
+#   python Baselines/tune.py --model WuKong --trials 16 --out runs/tune/WuKong
 #
 # Early stopping and checkpoint selection use the validation split only
 # (monitor below); the test split is evaluated once, after training.
@@ -91,6 +91,63 @@ WuKong_kuairand_1k:
     mlp_batch_norm: True
     layer_norm: True
     net_dropout: 0.1
+    epochs: 20
+    shuffle: True
+    seed: 2024
+    monitor: AUC
+    monitor_mode: max
+
+# ─────────────────────────────────────────────────────────────
+# FiGNN — graph neural network over feature fields (CIKM 2019)
+# Fills the GNN-based CTR slot; no behaviour sequence (kuairand_1k_noseq).
+# ─────────────────────────────────────────────────────────────
+FiGNN_kuairand_1k:
+    model: FiGNN
+    dataset_id: kuairand_1k_noseq
+    loss: binary_crossentropy
+    metrics: [logloss, AUC]
+    task: binary_classification
+    optimizer: adam
+    learning_rate: 1.0e-3
+    embedding_regularizer: 1.0e-6
+    net_regularizer: 0
+    batch_size: 4096
+    embedding_dim: 64
+    gnn_layers: 3
+    use_residual: True
+    use_gru: True
+    reuse_graph_layer: False
+    epochs: 20
+    shuffle: True
+    seed: 2024
+    monitor: AUC
+    monitor_mode: max
+
+# ─────────────────────────────────────────────────────────────
+# DCNv2 — deep & cross network v2 (WWW 2021); optional reference
+# ─────────────────────────────────────────────────────────────
+DCNv2_kuairand_1k:
+    model: DCNv2
+    dataset_id: kuairand_1k_noseq
+    loss: binary_crossentropy
+    metrics: [logloss, AUC]
+    task: binary_classification
+    optimizer: adam
+    model_structure: parallel
+    use_low_rank_mixture: False
+    low_rank: 32
+    num_experts: 4
+    learning_rate: 1.0e-3
+    embedding_regularizer: 1.0e-6
+    net_regularizer: 0
+    batch_size: 4096
+    embedding_dim: 64
+    stacked_dnn_hidden_units: [512, 256, 128]
+    parallel_dnn_hidden_units: [512, 256, 128]
+    dnn_activations: relu
+    num_cross_layers: 3
+    net_dropout: 0.1
+    batch_norm: False
     epochs: 20
     shuffle: True
     seed: 2024

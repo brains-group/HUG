@@ -1,34 +1,38 @@
 """
 train.py
 ========
-Trains and evaluates the FuxiCTR baselines (TransAct, WuKong) on KuaiRand-1K.
+Trains and evaluates one FuxiCTR baseline (TransAct, WuKong, FiGNN, DCNv2) on
+KuaiRand-1K as a single job (spec 04 job contract).
 
 Training follows FuxiCTR's run_expid.py: early stopping and checkpoint
 selection on the validation split, best weights reloaded at the end.  The
-selected model then scores valid and test once, and metrics are computed with
-HUG's own compute_metrics (AUC, AP, LogLoss, per-user nDCG@10) so baseline
-and HUG numbers are directly comparable.
+selected model then scores val and the training holdout (and test, only for a
+queue-issued final_eval), and metrics are computed with Framework/metrics.py —
+the same code, schema and bucket keys as HUG.
 
 Usage:
-    python train.py --model TransAct --gpu 0
-    python train.py --model all --gpu 0 --seeds 2024 2025 2026
+    python train.py --model TransAct --gpu 0 --run-dir ../runs/dev/TransAct
+    python train.py --model WuKong --params best.yaml --seed 43 --run-dir ...
 
 Prerequisites:
-    python preprocess.py          → ./data/processed/kuairand_1k/*.csv
+    python preprocess.py          → ./data/processed/kuairand_1k_csv/*.csv
     bash setup_fuxictr.sh         → ./FuxiCTR (model_zoo sources, pinned)
 
-Output:
-    ../runs/<Model>[_seed<n>]/final_metrics.json   (same layout as HUG runs)
-    ../runs/<Model>[_seed<n>]/<expid>.log          (FuxiCTR training log)
+Run directory:
+    final_metrics.json, val_preds.npz (row_id, user, label, score),
+    test_preds.npz (final_eval only), best.pt, resolved_config.yaml, <model>.log
 """
 
 from __future__ import annotations
 
 import argparse
 import gc
+import glob
+import itertools
 import json
 import logging
 import os
+import pickle
 import shutil
 import sys
 from dataclasses import asdict
@@ -36,118 +40,203 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import yaml
 
 ROOT         = Path(__file__).resolve().parent
 CONFIG_DIR   = ROOT / "config"
 FUXICTR_ROOT = Path(os.environ.get("FUXICTR_ROOT", ROOT / "FuxiCTR"))
-RUNS_DIR     = ROOT.parent / "runs"
+CSV_DIR      = ROOT / "data" / "processed" / "kuairand_1k_csv"
+sys.path.insert(0, str(ROOT.parent / "Framework"))
+
+from metrics import compute_metrics  # noqa: E402
+from runtime import environment_versions, is_quiet, set_determinism  # noqa: E402
+from test_guard import authorize_test_access  # noqa: E402
 
 MODELS = {
     "TransAct": "TransAct_kuairand_1k",
     "WuKong":   "WuKong_kuairand_1k",
+    "FiGNN":    "FiGNN_kuairand_1k",
+    "DCNv2":    "DCNv2_kuairand_1k",
 }
+BUCKETS = {"video_train_count": "bucket_video_train_count", "coldwarm": "bucket_coldwarm",
+           "history_len": "bucket_history_len"}
+DRY_RUN_EVAL_BATCHES = 20
 
 
-def run(model_name: str, gpu: int, seed: int | None,
-        epochs: int | None = None, runs_dir: Path = RUNS_DIR) -> dict:
+class _Limited:
+    """First `n` batches of a FuxiCTR data generator (dry runs)."""
+
+    def __init__(self, gen, n: int) -> None:
+        self.gen, self.n = gen, n
+
+    def __iter__(self):
+        return itertools.islice(iter(self.gen), self.n)
+
+    def __len__(self) -> int:
+        return min(self.n, len(self.gen))
+
+
+def _import_model_zoo(model_name: str):
+    zoo_dir = FUXICTR_ROOT / "model_zoo" / model_name
+    if not zoo_dir.is_dir():
+        raise FileNotFoundError(f"{zoo_dir} not found — run setup_fuxictr.sh first")
+    for mod in [m for m in sys.modules if m == "src" or m.startswith("src.")]:
+        del sys.modules[mod]
+    sys.path.insert(0, str(zoo_dir))
+    import src  # noqa: E402
+    return src
+
+
+def _transform_extra(data_dir: Path, name: str, csv: Path) -> str:
+    """Transform an extra CSV (the holdout) with the fitted feature processor."""
+    from fuxictr.preprocess.build_dataset import transform
+    out = data_dir / f"{name}.parquet"
+    if not out.exists():
+        with open(data_dir / "feature_processor.pkl", "rb") as f:
+            fe = pickle.load(f)
+        ddf = fe.read_data(str(csv), data_format="csv")
+        transform(fe, fe.preprocess(ddf), name)
+    return str(data_dir / name)
+
+
+def _score(model, gen, ref: pd.DataFrame, split: str):
+    y_pred = model.predict(gen)
+    ref = ref.iloc[:len(y_pred)]
+    if len(y_pred) != len(ref):
+        raise RuntimeError(f"{split}: {len(y_pred)} predictions for {len(ref)} rows")
+    y = ref["is_click"].to_numpy(dtype=np.float64)
+    p = np.clip(y_pred, 1e-7, 1 - 1e-7)
+    loss = float(-np.mean(y * np.log(p) + (1 - y) * np.log(1 - p)))
+    m = compute_metrics(split, y, y_pred, loss, user_idxs=ref["user_id"].to_numpy(),
+                        buckets={k: ref[c].astype(str).to_numpy() for k, c in BUCKETS.items()})
+    preds = {"row_id": ref["row_id"].to_numpy(np.int64), "user": ref["user_id"].to_numpy(np.int64),
+             "label": y.astype(np.float32), "score": y_pred.astype(np.float32)}
+    return m, preds
+
+
+def run(args) -> dict:
+    run_dir = Path(args.run_dir).resolve()
+    done = run_dir / "final_metrics.json"
+    if done.exists() and args.config_hash and not args.eval_only:
+        if json.loads(done.read_text()).get("config_hash") == args.config_hash:
+            print(f"[train] {run_dir} already complete for this config — skipping")
+            return json.loads(done.read_text())
+    run_dir.mkdir(parents=True, exist_ok=True)
+    if args.eval_test:
+        authorize_test_access(run_dir.parent, args.test_access_token,
+                              args.i_know_this_touches_test, run_dir.name, args.config_hash)
+
     from fuxictr.features import FeatureMap
     from fuxictr.preprocess import FeatureProcessor, build_dataset
     from fuxictr.pytorch.dataloaders import RankDataLoader
     from fuxictr.pytorch.torch_utils import seed_everything
     from fuxictr.utils import load_config, print_to_json, set_logger
 
-    expid = MODELS[model_name]
-    zoo_dir = FUXICTR_ROOT / "model_zoo" / model_name
-    if not zoo_dir.is_dir():
-        raise FileNotFoundError(f"{zoo_dir} not found — run setup_fuxictr.sh first")
-
-    # Each model_zoo entry ships its own `src` package; make this one importable
-    for mod in [m for m in sys.modules if m == "src" or m.startswith("src.")]:
-        del sys.modules[mod]
-    sys.path.insert(0, str(zoo_dir))
-    import src  # noqa: E402
-
-    params = load_config(str(CONFIG_DIR), expid)
-    params["gpu"] = gpu
-    if epochs is not None:
-        params["epochs"] = epochs
-    if seed is not None:
-        params["seed"] = seed
-        params["model_id"] = f"{expid}_seed{seed}"
+    src = _import_model_zoo(args.model)
+    params = load_config(str(CONFIG_DIR), MODELS[args.model])
+    overrides = yaml.safe_load(Path(args.params).read_text()) if args.params else {}
+    params.update(overrides or {})
+    params["gpu"] = args.gpu
+    params["seed"] = args.seed
+    if args.epochs is not None:
+        params["epochs"] = args.epochs
+    if args.max_steps:
+        params["epochs"] = 1
+    params["verbose"] = 0 if is_quiet(args.quiet) else 1
+    # One processed-data cache per vocabulary threshold (fitted on train.csv only)
+    params["dataset_id"] = f"{params['dataset_id']}_m{params['min_categr_count']}"
+    params["model_root"] = str(run_dir)
+    params["model_id"] = args.model
     set_logger(params)
     logging.info("Params: " + print_to_json(params))
-    seed_everything(seed=params["seed"])
+    (run_dir / "resolved_config.yaml").write_text(yaml.safe_dump(
+        {k: v for k, v in params.items() if isinstance(v, (int, float, str, list, dict, bool, type(None)))}))
+    set_determinism(args.seed)
+    seed_everything(seed=args.seed)
 
-    data_dir = os.path.join(params["data_root"], params["dataset_id"])
+    data_dir = Path(params["data_root"]) / params["dataset_id"]
     feature_encoder = FeatureProcessor(**params)
-    params["train_data"], params["valid_data"], params["test_data"] = \
-        build_dataset(feature_encoder, **params)
-    feature_map = FeatureMap(params["dataset_id"], data_dir)
-    feature_map.load(os.path.join(data_dir, "feature_map.json"), params)
+    params["train_data"], params["valid_data"], params["test_data"] = build_dataset(feature_encoder, **params)
+    feature_map = FeatureMap(params["dataset_id"], str(data_dir))
+    feature_map.load(str(data_dir / "feature_map.json"), params)
 
     model = getattr(src, params["model"])(feature_map, **params)
-    model.count_parameters()
+    n_params = int(sum(p.numel() for p in model.parameters()))
+    ckpt = run_dir / "best.pt"
 
-    train_gen, valid_gen = RankDataLoader(feature_map, stage="train", **params).make_iterator()
-    model.fit(train_gen, validation_data=valid_gen, **params)   # reloads best-on-valid weights
-    del train_gen
-    gc.collect()
+    valid_gen = None
+    if args.eval_only:
+        model.load_weights(args.checkpoint or str(ckpt))
+    else:
+        train_gen, valid_gen = RankDataLoader(feature_map, stage="train", **params).make_iterator()
+        if args.max_steps:
+            train_gen = _Limited(train_gen, args.max_steps)
+            valid_gen = _Limited(valid_gen, DRY_RUN_EVAL_BATCHES)
+        model.fit(train_gen, validation_data=valid_gen, **params)   # reloads best-on-valid weights
+        del train_gen
+        gc.collect()
+        shutil.move(model.checkpoint, ckpt)                          # keep only the best weights
+        for f in glob.glob(str(run_dir / params["dataset_id"] / "*.model")):
+            os.remove(f)
 
-    # HUG's metric implementation, imported lazily so its logging setup does
-    # not pre-empt FuxiCTR's
-    sys.path.insert(0, str(ROOT.parent / "Framework"))
-    from main import compute_metrics
+    if valid_gen is None:
+        _, valid_gen = RankDataLoader(feature_map, stage="train", **params).make_iterator()
+        if args.max_steps:
+            valid_gen = _Limited(valid_gen, DRY_RUN_EVAL_BATCHES)
 
-    results = {}
-    processed = Path(params["train_data"]).parent
-    for split, gen in [
-        ("val",  valid_gen),
-        ("test", RankDataLoader(feature_map, stage="test", **params).make_iterator()),
-    ]:
-        csv = processed.parent / "kuairand_1k" / ("valid.csv" if split == "val" else "test.csv")
-        ref = pd.read_csv(csv, usecols=["user_id", "is_click"])
-        y_pred = model.predict(gen)
-        if len(y_pred) != len(ref):
-            raise RuntimeError(f"{split}: {len(y_pred)} predictions for {len(ref)} rows")
-        y_true = ref["is_click"].to_numpy(dtype=np.float64)
-        loss = float(-np.mean(y_true * np.log(np.clip(y_pred, 1e-7, 1))
-                              + (1 - y_true) * np.log(np.clip(1 - y_pred, 1e-7, 1))))
-        m = compute_metrics(split, y_true, y_pred, loss,
-                            user_idxs=ref["user_id"].to_numpy())
-        logging.info(str(m))
-        results[split] = asdict(m)
+    ref_cols = ["row_id", "user_id", "is_click", *BUCKETS.values()]
+    val_m, val_p = _score(model, valid_gen, pd.read_csv(CSV_DIR / "valid.csv", usecols=ref_cols), "val")
+    np.savez(run_dir / "val_preds.npz", **val_p)
 
-    run_name = model_name if seed is None else f"{model_name}_seed{seed}"
-    out_dir = runs_dir / run_name
-    out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "final_metrics.json").write_text(json.dumps({
-        **results,
-        "params": {k: v for k, v in params.items() if isinstance(v, (int, float, str, list, bool, type(None)))},
-        "n_params": int(sum(p.numel() for p in model.parameters())),
-    }, indent=2, default=str))
-    log_file = Path(params["model_root"]) / params["dataset_id"] / f"{params['model_id']}.log"
-    if log_file.exists():
-        shutil.copy(log_file, out_dir / log_file.name)
-    logging.info("Results → %s", out_dir)
-    return results
+    hold_path = _transform_extra(data_dir, "holdout", CSV_DIR / "holdout.csv")
+    hold_gen = RankDataLoader(feature_map, stage="test", **{**params, "test_data": hold_path}).make_iterator()
+    if args.max_steps:
+        hold_gen = _Limited(hold_gen, DRY_RUN_EVAL_BATCHES)
+    hold_m, _ = _score(model, hold_gen, pd.read_csv(CSV_DIR / "holdout.csv", usecols=ref_cols), "holdout")
+
+    test_m = None
+    if args.eval_test:
+        test_gen = RankDataLoader(feature_map, stage="test", **params).make_iterator()
+        test_m, test_p = _score(model, test_gen, pd.read_csv(CSV_DIR / "test.csv", usecols=ref_cols), "test")
+        np.savez(run_dir / "test_preds.npz", **test_p)
+
+    logging.info(str(val_m))
+    logging.info(str(hold_m))
+    out = {
+        "job": run_dir.name, "kind": "baseline", "model": args.model, "arm": None,
+        "seed": args.seed, "config_hash": args.config_hash,
+        "val": asdict(val_m), "holdout": asdict(hold_m),
+        "test": asdict(test_m) if test_m is not None else None,
+        "best_epoch": None, "params": {k: v for k, v in params.items()
+                                       if isinstance(v, (int, float, str, bool, type(None)))},
+        "tuned": overrides, "n_params": n_params,
+        "checkpoint_mb": round(ckpt.stat().st_size / 1e6, 1) if ckpt.exists() else None,
+        "environment": environment_versions(),
+    }
+    done.write_text(json.dumps(out, indent=2, default=float))
+    logging.info("Results → %s", run_dir)
+    return out
 
 
-def main() -> None:
+def parse_args(argv=None):
     p = argparse.ArgumentParser()
-    p.add_argument("--model", default="all", choices=list(MODELS) + ["all"])
-    p.add_argument("--gpu",   type=int, default=0, help="GPU index, -1 for CPU")
-    p.add_argument("--seeds", type=int, nargs="*", default=None,
-                   help="Override the config seed; one run per seed")
+    p.add_argument("--model", required=True, choices=list(MODELS))
+    p.add_argument("--gpu", type=int, default=0, help="GPU index, -1 for CPU")
+    p.add_argument("--seed", type=int, default=2024)
+    p.add_argument("--run-dir", required=True)
+    p.add_argument("--params", default=None, help="YAML of model-config overrides (tuned settings)")
     p.add_argument("--epochs", type=int, default=None, help="Override the config epochs")
-    p.add_argument("--runs-dir", type=Path, default=RUNS_DIR)
-    args = p.parse_args()
-
-    names = list(MODELS) if args.model == "all" else [args.model]
-    seeds = args.seeds or [None]
-    for name in names:
-        for seed in seeds:
-            run(name, args.gpu, seed, args.epochs, args.runs_dir)
+    p.add_argument("--max-steps", type=int, default=0, help="dry run: N training batches")
+    p.add_argument("--quiet", action="store_true")
+    p.add_argument("--eval-only", action="store_true")
+    p.add_argument("--checkpoint", default=None)
+    p.add_argument("--eval-test", action="store_true")
+    p.add_argument("--test-access-token", default=None)
+    p.add_argument("--i-know-this-touches-test", action="store_true")
+    p.add_argument("--config-hash", default=None)
+    p.add_argument("--data-dir", default=None, help="accepted for CLI symmetry; CSVs come from preprocess.py")
+    return p.parse_args(argv)
 
 
 if __name__ == "__main__":
-    main()
+    run(parse_args())

@@ -99,6 +99,7 @@ class HugData:
     node_data:  dict                    # tensors for InputEncoder.set_node_data
     vocab:      dict                    # sizes and OOV shares
     fingerprint: dict
+    video_cat_raw: object = None        # shared categorical strings per video (node order)
 
 
 def _vocab(counts: np.ndarray, m: int) -> np.ndarray:
@@ -215,6 +216,7 @@ def prepare(args, data: KuaiRandData | None = None, bundle: HKGBundle | None = N
         buckets=bucket_keys(inter.video, inter.time, he - hs, t_val, boundaries[snap], args.max_seq_len),
         store=store, bundle=bundle, node_data=node_data, vocab=vocab,
         fingerprint=data_fingerprint(inter),
+        video_cat_raw=vc.reset_index(drop=True),
     )
 
 

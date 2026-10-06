@@ -22,6 +22,7 @@ Test classes:
 
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 from pathlib import Path
@@ -1560,3 +1561,99 @@ class TestHUG:
         out = model(b, vx, tables, train=True)
         out["loss"].backward()
         assert torch.isfinite(out["loss"])
+
+
+# ── Baseline parity (spec 04 W5 tests 1, 11–14) ────────────────────────────────
+
+BASELINE_CSV = Path(__file__).resolve().parents[1] / "Baselines" / "data" / "processed" / "kuairand_1k_csv"
+
+
+def test_fuxictr_vocab_fits_on_train_only(tmp_path):
+    """A categorical value seen only in validation maps to OOV."""
+    pytest.importorskip("fuxictr")
+    from fuxictr.preprocess import FeatureProcessor, build_dataset
+    import pickle
+    tr = pd.DataFrame({"c": ["a", "b", "a", "b"] * 5, "y": [0, 1] * 10})
+    va = pd.DataFrame({"c": ["zzz_val_only", "a"], "y": [0, 1]})
+    tr.to_csv(tmp_path / "train.csv", index=False)
+    va.to_csv(tmp_path / "valid.csv", index=False)
+    params = dict(dataset_id="toy", data_root=str(tmp_path), data_format="csv",
+                  train_data=str(tmp_path / "train.csv"), valid_data=str(tmp_path / "valid.csv"),
+                  test_data=None, min_categr_count=1,
+                  feature_cols=[{"name": "c", "active": True, "dtype": "str", "type": "categorical"}],
+                  label_col={"name": "y", "dtype": "float"})
+    fe = FeatureProcessor(**params)
+    build_dataset(fe, **params)
+    vocab = json.loads((tmp_path / "toy" / "feature_vocab.json").read_text())["c"]
+    assert "zzz_val_only" not in vocab
+    with open(tmp_path / "toy" / "feature_processor.pkl", "rb") as f:
+        fe2 = pickle.load(f)
+    enc = fe2.transform(pd.DataFrame({"c": ["zzz_val_only"], "y": [0]}))
+    assert int(enc["c"].iloc[0]) == vocab["__OOV__"]
+
+
+class TestBaselineParityReal:
+    """HUG's per-row inputs equal the baseline CSV columns (needs --data-dir and preprocess.py output)."""
+
+    @pytest.fixture(scope="class")
+    def real_hug(self, real_data_dir):
+        if real_data_dir is None:
+            pytest.skip("--data-dir not provided")
+        if not (BASELINE_CSV / "valid.csv").exists():
+            pytest.skip("run Baselines/preprocess.py first")
+        import hug_train
+        args = _hug_args(data_dir=str(real_data_dir), snapshot_hours=24, max_seq_len=50,
+                         min_id_count=5, no_graph=True, emb_dim=64, cache_dir="none")
+        args.min_interactions = 10
+        return hug_train.prepare(args), args
+
+    @pytest.fixture(scope="class")
+    def sample(self, real_hug):
+        from features import USER_CAT_COLS, VIDEO_CAT_COLS, VIDEO_STAT_COLS
+        va = pd.read_csv(BASELINE_CSV / "valid.csv", dtype={"hist_video_ids": str},
+                         keep_default_na=False, low_memory=False)
+        return va.sample(10_000, random_state=0).sort_values("row_id").reset_index(drop=True)
+
+    def test_history_parity(self, real_hug, sample):
+        import hug_train
+        d, args = real_hug
+        rows = sample["row_id"].to_numpy()
+        b = hug_train.HugBatcher(d, args.max_seq_len)(rows)
+        inv = dict(d.inter.frame[["video_id"]].assign(n=d.inter.video)
+                   .drop_duplicates().set_index("n")["video_id"].items())     # node idx -> raw id
+        for i, h in enumerate(b["hist"].numpy()):
+            hug_hist = [str(inv[v]) for v in h if v >= 0]
+            csv_hist = sample["hist_video_ids"].iloc[i].split() if sample["hist_video_ids"].iloc[i] else []
+            assert hug_hist == csv_hist, rows[i]
+
+    def test_feature_parity(self, real_hug, sample):
+        import hug_train
+        from features import VIDEO_STAT_COLS, video_categoricals, VIDEO_CAT_COLS
+        d, args = real_hug
+        rows = sample["row_id"].to_numpy()
+        b = hug_train.HugBatcher(d, args.max_seq_len)(rows)
+        assert np.array_equal(b["ctx_cat"][:, 0].numpy(), sample["tab"].to_numpy())
+        assert np.array_equal(b["ctx_cat"][:, 1].numpy(), sample["hour"].to_numpy())
+        np.testing.assert_allclose(b["ctx_num"].numpy(), sample[VIDEO_STAT_COLS].to_numpy(), atol=1e-5)
+        assert np.array_equal(d.inter.frame["video_id"].to_numpy()[rows], sample["video_id"].to_numpy())
+        assert np.array_equal(d.inter.label[rows].astype(int), sample["is_click"].to_numpy())
+        # video categoricals in the CSV are the shared encoding HUG embeds
+        vc = d.video_cat_raw.set_index("video_id")
+        for c in VIDEO_CAT_COLS:
+            assert (vc.loc[sample["video_id"], c].to_numpy() == sample[c].astype(str).to_numpy()).all(), c
+
+    def test_bucket_keys_shared(self, real_hug, sample):
+        d, _ = real_hug
+        rows = sample["row_id"].to_numpy()
+        for name, col in [("video_train_count", "bucket_video_train_count"),
+                          ("coldwarm", "bucket_coldwarm"), ("history_len", "bucket_history_len")]:
+            assert (d.buckets[name][rows] == sample[col].astype(str).to_numpy()).all(), name
+
+    def test_holdout_excluded_from_baseline_train(self, real_hug):
+        d, _ = real_hug
+        train_ids = pd.read_csv(BASELINE_CSV / "train.csv", usecols=["row_id"])["row_id"].to_numpy()
+        hold_ids  = pd.read_csv(BASELINE_CSV / "holdout.csv", usecols=["row_id"])["row_id"].to_numpy()
+        assert np.array_equal(np.sort(hold_ids), d.holdout)
+        assert not np.isin(hold_ids, train_ids).any()
+        assert len(train_ids) + len(hold_ids) == len(d.inter.rows(SPLIT_TRAIN))
+

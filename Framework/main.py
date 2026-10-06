@@ -492,7 +492,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
 
     # Data & paths
-    p.add_argument("--data-dir",   type=str, required=True,
+    p.add_argument("--data-dir",   type=str,
+                   default=str(Path(__file__).resolve().parents[1] / "KuaiRand-1K" / "data"),
                    help="Path to KuaiRand data directory (six CSV files)")
     p.add_argument("--cache-dir",  type=str, default=None,
                    help="Directory for HKG cache and model checkpoint. "
