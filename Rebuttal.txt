@@ -1,0 +1,9 @@
+We thank all the reviewers for their feedback.
+
+R1, R3: The KGA and recency gate are optional ablated components evaluated for completeness, not primary contribution. Our core claims (dual-view decomposition, dedicated R-GCN and GGNN encoders, and cross-attention fusion) hold across all ablation settings. KGAT is configured with identical dimensions to HUG-Dual (h=128, d=64), isolating architectural benefit from capacity. On IPS, the near-unity weights are a property of KuaiRand-1K's 0.37% random-policy fraction, which we explicitly acknowledge; the framing is intended to motivate the mechanism for datasets with larger intervention fractions, not to claim measurable lift on this dataset.
+
+R2-Q1: Our statement was based on the absence of linked repositories in the cited papers and our inability to find any official source code anywhere online.
+
+R2-Q2: The implementation sorts all interactions globally by timestamp and then follows an 80% train, 20% test split; no per-user partitioning occurs, and the look-ahead bias concern does not apply to the evaluation.
+
+R2-Q3: AUC=0.7683 corresponds to the L=1 configuration identified as optimal in our sensitivity analysis. A revision will designate L=1 as the recommended setting and report it explicitly.

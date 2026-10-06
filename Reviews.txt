@@ -1,0 +1,145 @@
+Review 1
+Strong Points	Architectural Novelty: The dual-view architecture that decouples structural knowledge (static topology) from sequential intent (short-term dynamics) using specialized GNN encoders is conceptually intuitive and well-reasoned.
+
+Transparent Reporting: The authors provide a highly transparent ablation study, honestly reporting when certain components fail to yield improvements or actively harm performance.
+
+Reproducibility: The use of the KuaiRand-1K dataset to mitigate exposure bias, along with the commitment to open-source the model code, supports strong reproducibility.
+Weak Points	The paper proposes several complex components—namely the Inverse Propensity Score (IPS) weighting, the Knowledge Graph Alignment (KGA) gate, and the recency gate — that either have negligible impact or actively degrade performance on the evaluated dataset.
+
+The selected baselines (DIN, BST, KGAT) are somewhat dated. While the authors correctly note that many recent CTR/CVR models are closed-source, comparing against more modern open-source architectures would better contextualize the state-of-the-art gap.
+
+The reliance on a single dataset severely limits the validation of several proposed architectural components. Authors acknowledge this in the conclusion section - "propensity weights differ from unity by only 0.37%, calls for evaluation on datasets with a larger random-policy intervention fraction."
+Relevance to the Track	
+5: Strong fit
+Originality	
+4: High
+Coverage of Related Literature	
+3: Moderate
+Technical Soundness	
+4: Strong Technical Soundness
+Overall Presentation	
+4: Well-Presented
+Impact	
+4: High
+Reproducibility of Methods (N/A for Past, Present and Future papers)	
+4: Highly Reproducible
+Review	This paper presents HUG, a framework for Conversion Rate (CVR) prediction that decomposes static metadata and dynamic session interactions into distinct graph pathways (R-GCN and GGNN). The architectural intuition is sound: decoupling these signals prevents highly transient in-session behavior from washing out stable topological user preferences. The reported performance gains over established baselines like BST and KGAT support the utility of this core dual-view approach.
+
+However, the experimental validation is severely limited by the exclusive reliance on the KuaiRand-1K dataset. Due to the dataset's specific characteristics—namely, the extreme sparsity of random-policy interactions—several of the framework's proposed components (e.g., the IPS weighting and KGA gate) provide negligible empirical lift. Furthermore, the ablation study reveals that the proposed Recency Gate actively degrades performance. Presenting a complex architecture where multiple modules act as theoretical dead weight on the sole evaluation benchmark significantly undermines the paper's technical contribution.
+
+While the core decoupled encoding methodology is valid and the authors are commendable for their transparency in the ablation studies and open-sourcing their code, the inclusion of unvalidated, ineffective components remains a major concern. I am currently leaning toward a Weak Accept, but I am willing to adjust my overall score based on how the authors justify the inclusion of these specific modules during the rebuttal phase.
+Overall Evaluation	
+1: Weak accept
+Key Clarification	Could the authors clarify the rationale for retaining the Recency Gate and KGA gate in the finalized HUG-Dual architecture, given that the ablation study demonstrates they provide either negligible benefit or actively degrade performance on your sole evaluation dataset? Will evaluation on a denser dataset be included to validate these components?
+Review 2
+Strong Points	1. Clear Intuition for Modality Decoupling: The conceptual framework of isolating long-term structural topology (processed via an R-GCN over metadata) from transient sequential intent (processed via a GGNN over session graphs) is well-motivated by the differing temporal properties of these signals.
+2. Extensive Internal Ablation Matrix: Table 3 documents 15 distinct experimental runs that systematically isolate the effects of the hyperparameter layers $L$, internal dimensions $h$ and $d$, the Inverse Propensity Score (IPS) weighting, and the custom gating layers.
+3. Thorough Re-implementation Framework for Baseline Alignment: The adaptation of KGAT to ingest the exact same heterogeneous knowledge graph (HKG) substrate demonstrates engineering diligence and establishes a controlled environment for structural comparisons.
+Weak Points	1. Systemic Temporal Leakage via Per-User Partitioning: The evaluation protocol employs a per-user temporal split (earliest 80% for training, recent 20% for testing). On a highly dynamic short-video platform, this alignment severs the global timeline. A model training on a user whose history spans late horizons will ingest global item popularity, trending metadata, and collaborative filtering signals that are chronologically in the future relative to a user whose test history occurs in an earlier horizon. This introduces severe look-ahead bias, rendering the offline metrics ($AUC = 0.7683$, $AP = 0.6578$) fundamentally compromised.
+2. Baseline Evasion and Factual Misrepresentation of the State-of-the-Art: Section 4.2 claims that competitive 2025–2026 architectures, specifically InterFormer, OneTrans, and HyFormer, are "closed-source and thus cannot be tested". This statement is factually incorrect. All three architectures have publicly documented open-source implementations widely utilized within the recommendation systems community. Evading evaluation against modern unified backbones by benchmarking exclusively against seven-to-eight-year-old architectures (DIN 2018, BST 2019, KGAT 2019) invalidates claims of state-of-the-art performance.
+3. Empirical Failure and Redundancy of Proposed Algorithmic Components: The core architectural components introduced as novel contributions either degrade performance or are functionally inert. Disabling the Recency Gate (RG off) increases the AUC by +0.0045 and the AP by +0.0058, confirming it introduces optimization noise over a base GGNN that already inherently captures sequence order. Activating the Knowledge Graph Alignment (KGA) gate yields a statistically negligible shift ($\Delta AUC = -0.0001$), collapsing due to graph sparsity. The framework's absolute best performance occurs when all proposed architectural novelties are removed, revealing that any gains over antiquated baselines stem solely from rich multi-modal feature grouping rather than algorithmic innovation.
+4. Mathematical Theater in Optimization Objective: The IPS weighting scheme assigns a scalar weight of $w=1.0$ to the uniform random-policy subset and $w=0.9963$ to the standard interactions. This minor 0.37% variance in gradient magnitude is entirely neutralized by the running variance normalization mechanics of the adaptive Adam optimizer. This renders the objective mathematically inert, as corroborated by a marginal 0.0003 shift in final AUC.
+5. Misleading Reporting of Headline Results: The abstract prominently highlights an AUC of 0.7683 and an AP of 0.6578 as the primary results of the HUG framework. Table 3 reveals that these numbers do not belong to the proposed architecture design ($L=2$), but are cherry-picked from a hyperparameter sensitivity sweep where message passing is reduced to a single layer ($L=1$).
+Relevance to the Track	
+4: Fits
+Originality	
+2: Limited
+Coverage of Related Literature	
+2: Weak
+Technical Soundness	
+1: Fundamentally Flawed
+Overall Presentation	
+4: Well-Presented
+Impact	
+1: Minimal
+Reproducibility of Methods (N/A for Past, Present and Future papers)	
+4: Highly Reproducible
+Review	The submission introduces HUG, an architecture that maps short-video conversion interactions and content metadata into a heterogeneous unified graph, subsequently decomposing it into structural and sequential subgraphs to be processed by an R-GCN and a GGNN encoder. While the engineering pipeline is clearly mapped and the text is structurally coherent, a critical analysis of the evaluation methodology, baseline execution, and the empirical outcomes of the ablation study reveals that the paper's core claims are ungrounded.
+1. The foremost technical failure lies in the evaluation regime. In conversion rate (CVR) prediction tasks within dynamic content platforms, maintaining strict global chronological boundaries is vital. By executing local per-user temporal splits, the global training set incorporates records from future timestamps relative to independent user evaluation windows. This setup allows future collaborative filtering vectors, creator popularity shifts, and viral macro-trends to bleed into the representation space. The resulting classification performance reflects interpolation within a leaked global state rather than true predictive extrapolation.
+2. This flaw is compounded by a clear evasion of contemporary baseline models. Benchmarking against DIN, BST, and KGAT restricts the comparison to architectures from 2018 and 2019. The exclusion of modern baselines is defended by fabricating a claim that competitive models like InterFormer, OneTrans, and HyFormer are closed-source. Because these repositories are publicly accessible, the omission represents a significant breach of academic rigor.
+3. Furthermore, the framework's internal mechanics fail to validate its algorithmic design. The ablation matrix in Table 3 establishes that the three main architectural proposals—the Recency Gate, the KGA gate, and the IPS-weighted loss function—either degrade performance or have no statistical effect. The Recency Gate's learned sigmoid interpolation acts as a redundant constraint over the GGNN's internal gated propagation, forcing the network into over-parameterization on sparse manifolds. The KGA gate injects an additive path feature $W_{kg}r_{uv}$ pre-softmax into the cross-attention layers. Due to the high sparsity of the KuaiRand-1K graph, this vector approaches zero for the vast majority of pairs, allowing the dynamic dot-product weights to dominate and rendering the gate useless.
+4. Finally, the hyperparameter sensitivity analysis exposes a structural paradox. The model achieves its peak performance at exactly $L=1$ layer, with performance dropping sharply at $L=3$ due to over-smoothing. An $L=1$ configuration signifies that the architecture cannot support deep graph propagation or exploit high-order relational topologies. It operates essentially as a localized linear projection of immediate, single-hop neighbor attributes.
+Because the proposed algorithmic additions fail empirically, the framework reduces to a standard concatenation of established GNN models. The performance advantages reported over the baseline models are a trivial consequence of supplying HUG with a richer, graph-structured multi-modal feature registry compared to the flat token sequences supplied to DIN and BST.
+Overall Evaluation	
+-2: Reject
+Key Clarification	1. Justification of Baseline Misrepresentation: The authors must explain why Section 4.2 asserts that InterFormer (CIKM 2025), OneTrans (WWW 2026), and HyFormer (Arxiv 2026) are closed-source and un-testable, despite the widespread public availability of their official code repositories.
+2. Rectification of Temporal Leakage: The authors must provide results under a strict, global Time-Dependent Split (TDS) or chronological rollout protocol using the high-resolution timestamps natively present in KuaiRand-1K, proving the framework can generalize without look-ahead bias.
+3. Resolution of the Hyperparameter and Reporting Mismatch: Clarify why the abstract states a headline performance of $AUC = 0.7683$ when the default proposed architecture configuration ($L=2$) only achieves an AUC of 0.7625. If $L=1$ is the core recommendation, the text must be restructured to acknowledge that the framework functions optimally without deep graph propagation.
+4. Statistical Significance Validation: Provide variance metrics and paired t-tests across multiple initializations to confirm whether the minute performance deltas observed during component shifts are mathematically meaningful.
+Review 3
+Strong Points	1. The paper presents a clear rationale for separating long-term relational structure from short-term session intent using distinct graph views and specialized encoders (R-GCN and GGNN).
+
+
+2. The construction of a unified heterogeneous knowledge graph that integrates users, videos, sessions, authors, categories, and multiple interaction types is interesting
+
+3. The paper is clearly written and easy to follow.
+Weak Points	1.
+The evaluation relies exclusively on KuaiRand-1K. Although the dataset is appropriate and challenging, demonstrating robustness on additional public CTR/CVR datasets would substantially strengthen the paper’s claims regarding general applicability.
+
+2. The HUG models use substantially larger hidden dimensions (e.g., 64/128) compared with DIN/BST/KGAT embeddings of size 16. While this may be justified, it raises concerns that some performance gains may stem in part from increased model capacity rather than solely from architectural superiority.
+
+3. Claims around IPS weighting are not fully convincing.
+The IPS component has almost no measurable effect because the random-policy subset represents only 0.37% of the data. As a result, the paper’s framing around debiasing and policy correction feels somewhat overstated relative to the empirical evidence.
+Relevance to the Track	
+5: Strong fit
+Originality	
+3: Moderate
+Coverage of Related Literature	
+3: Moderate
+Technical Soundness	
+3: Adequate Technical Soundness
+Overall Presentation	
+4: Well-Presented
+Impact	
+3: Moderate
+Reproducibility of Methods (N/A for Past, Present and Future papers)	
+4: Highly Reproducible
+Review	1. What are the training and inference costs of HUG-Dual relative to KGAT and transformer-based
+Key Clarification	
+Review 3
+Strong Points	1. The separation of long-term relational structure from short-term session intent using distinct graph views is commendable.
+
+
+2. The construction of a unified heterogeneous knowledge graph that integrates users, videos, sessions, authors, and categories is interesting.
+
+3. The paper is clearly written and easy to follow.
+Weak Points	1.
+The evaluation relies only on KuaiRand-1K. Using additional datasets would better evaluate the effectiveness of the proposed approach.
+
+2. The HUG model uses larger hidden dimensions (Table 2) compared with DIN/BST/KGAT embeddings of size 16. This raises concerns about the fairness of the baseline comparisons.
+
+3. Claims around IPS weighting are not fully convincing.
+The IPS component has almost no measurable effect because the random-policy subset represents only 0.37% of the data. As a result, the paper’s framing around debiasing and policy correction feels overstated.
+Relevance to the Track	
+5: Strong fit
+Originality	
+3: Moderate
+Coverage of Related Literature	
+3: Moderate
+Technical Soundness	
+3: Adequate Technical Soundness
+Overall Presentation	
+4: Well-Presented
+Impact	
+3: Moderate
+Reproducibility of Methods (N/A for Past, Present and Future papers)	
+4: Highly Reproducible
+Review	The submission introduces the HUG framework for predicting the conversion rate in short-video recommendation. The motivation of addressing the challenges of signal sparsity and relational complexity is timely and relevant. The presentation is organised and easy to follow, and the implementation code is shared to enhance reproducibility.
+
+Despite the merits, there is room for improvement in the evaluation section. Authors are encouraged to address the highlighted issues to strengthen the submission.
+
+I have read the authors’ response and considered it in my final evaluation.
+Overall Evaluation	
+-2: Reject
+Key Clarification	
+Metareview
+Metareview
+Title	HUG: A Heterogeneous Unified Graph Framework for Conversion Rate Prediction
+Authors	Abhirup Dasgupta, Fernando Spadea and Oshani Seneviratne
+Text	Reviewers positively comment on the idea of the dual-view architecture, the ablation study, the paper's reproducibility and the general writing.
+
+However, they identify several weaknesses in the empirical evaluation of the presented approach (single dataset), selection of baselines, validity of comparison, and architectional choices.
+
+We thank the authors for submitting a rebuttal. While the rebuttal clarified several details, it did not address all reviewer concerns.
+
+We recommend the authors to extend the empirical evaluation with more datasets, stronger baselines, and clarifications of architectural choices and resubmit at a later point in time.

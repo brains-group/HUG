@@ -71,25 +71,39 @@ GROUPS: dict[str, list[tuple[str, str]]] = {
     "baselines_progression": [
         ("DIN",                               "DIN"),
         ("BST",                               "BST"),
-        ("1k_kgat_ips0_L2_h128d64",          "KGAT\n(no IPS)"),
-        ("1k_kgat_ips1_L2_h128d64",          "KGAT\n(IPS)"),
+        ("1k_kgat_ips0_L2_h128d64",          "KGAT\n(no SW)"),
+        ("1k_kgat_ips1_L2_h128d64",          "KGAT\n(SW)"),
         ("1k_single_kg0_ips1_rg1",           "HUG-Unified"),
         ("1k_dual_kg0_ips1_rg1",             "HUG-Dual\n(KGA off)"),
         ("1k_dual_kg64_ips1_rg1",            "HUG-Dual\n(full model)"),
     ],
     "ablations": [
         ("1k_dual_kg64_ips1_rg1",            "Full model"),
-        ("1k_dual_kg64_ips0_rg1",            "No IPS"),
+        ("1k_dual_kg64_ips0_rg1",            "No SW"),
         ("1k_dual_kg64_ips1_rg0",            "No recency\ngate"),
-        ("1k_dual_kg64_ips0_rg0",            "No IPS +\nno RG"),
+        ("1k_dual_kg64_ips0_rg0",            "No SW +\nno RG"),
     ],
     "sensitivity": [
-        ("1k_dual_kg64_ips1_rg1",            "Default\n(L=2, h=128)"),
+        ("1k_dual_kg64_ips1_rg1",            "Default\n(L=2, d=128)"),
         ("1k_dual_kg64_ips1_rg1_L1",         "L=1"),
         ("1k_dual_kg64_ips1_rg1_L3",         "L=3"),
-        ("1k_dual_kg32_ips1_rg1_h64d32",     "h=64, d=32"),
-        ("1k_dual_kg128_ips1_rg1_h256d128",  "h=256, d=128"),
+        ("1k_dual_kg32_ips1_rg1_h64d32",     "d=64, D=32"),
+        ("1k_dual_kg128_ips1_rg1_h256d128",  "d=256, D=128"),
     ],
+}
+
+# Figure 4 uses one representative configuration per architecture. The HUG-Dual
+# run is the configuration with the best final NDCG@10 in the results table.
+NDCG_EPOCH_RUNS: list[tuple[str, str]] = [
+    ("1k_dual_kg128_ips1_rg1_h256d128",      "HUG-Dual"),
+    ("1k_single_kg0_ips0_rg1",               "HUG-Unified"),
+    ("1k_kgat_ips0_L2_h128d64",              "KGAT"),
+]
+
+NDCG_EPOCH_COLOURS: dict[str, str] = {
+    "1k_dual_kg128_ips1_rg1_h256d128":       "#2CA02C",
+    "1k_single_kg0_ips0_rg1":                "#4C72B0",
+    "1k_kgat_ips0_L2_h128d64":               "#DD8452",
 }
 
 GROUP_TITLES = {
@@ -104,7 +118,7 @@ OUTPUT_FILES = {
     "sensitivity":           "fig3_sensitivity.pdf",
 }
 
-# Grey for external/KGAT baselines; blue→green progression for HUG variants
+# Grey for external/KGAT baselines; distinct colours for HUG variants
 RUN_COLOURS: dict[str, str] = {
     "DIN":                               "#8C8C8C",
     "BST":                               "#8C8C8C",
@@ -112,7 +126,7 @@ RUN_COLOURS: dict[str, str] = {
     "1k_kgat_ips1_L2_h128d64":          "#4D4D4D",
     "1k_single_kg0_ips0_rg1":           "#4C72B0",
     "1k_single_kg0_ips1_rg1":           "#4C72B0",
-    "1k_dual_kg0_ips1_rg1":             "#55A868",
+    "1k_dual_kg0_ips1_rg1":             "#DD8452",
     "1k_dual_kg64_ips1_rg1":            "#2CA02C",
     "1k_dual_kg64_ips0_rg1":            "#4C72B0",
     "1k_dual_kg64_ips1_rg0":            "#55A868",
@@ -221,14 +235,23 @@ def plot_single_metric(
     results: dict[str, dict],
     title: str,
     out_path: Path,
+    figsize: tuple[float, float] | None = None,
+    label_rotation: float | None = None,
+    ylabel: str | None = None,
+    ylim: tuple[float, float] | None = None,
 ) -> None:
     n_bars   = len(runs)
     x        = np.arange(n_bars)
     labels   = [lbl for _, lbl in runs]
     flat_labels = [lbl.replace("\n", "") for lbl in labels]
-    rotation = 30 if any(len(l) > 5 for l in flat_labels) else 0
+    rotation = (
+        label_rotation
+        if label_rotation is not None
+        else (30 if any(len(l) > 5 for l in flat_labels) else 0)
+    )
 
-    fig, ax = plt.subplots(figsize=(max(9, n_bars * 1.4), 6), constrained_layout=True)
+    default_figsize = (max(9, n_bars * 1.4), 6)
+    fig, ax = plt.subplots(figsize=figsize or default_figsize, constrained_layout=True)
 
     values, colours, missing = [], [], []
     for run_name, _ in runs:
@@ -253,12 +276,14 @@ def plot_single_metric(
                         ha="center", va="bottom", fontsize=16, fontweight="bold")
 
     direction = "↑ higher better" if higher_better else "↓ lower better"
-    ax.set_ylabel(f"{metric_label}  ({direction})")
+    ax.set_ylabel(ylabel or f"{metric_label}  ({direction})")
     ax.set_xticks(x)
     ax.set_xticklabels(labels, fontsize=18,
                        ha="right" if rotation else "center", rotation=rotation)
     ax.yaxis.set_major_formatter(mticker.FormatStrFormatter("%.3f"))
     zoom_ylim(ax, values, missing)
+    if ylim is not None:
+        ax.set_ylim(*ylim)
 
     save_fig(fig, out_path)
 
@@ -279,6 +304,7 @@ def plot_group(
     }
     for metric_key, metric_label, higher_better in METRICS:
         fname = f"{prefix}_{suffixes[metric_key]}.pdf"
+        compact_sensitivity_auc = group_key == "sensitivity" and metric_key == "auc"
         plot_single_metric(
             metric_key=metric_key,
             metric_label=metric_label,
@@ -287,6 +313,10 @@ def plot_group(
             results=results,
             title=f"{GROUP_TITLES[group_key]} — {metric_label}",
             out_path=out_dir / fname,
+            figsize=(9, 3.8) if compact_sensitivity_auc else None,
+            label_rotation=20 if compact_sensitivity_auc else None,
+            ylabel="AUC\n(higher is better)" if compact_sensitivity_auc else None,
+            ylim=(0.750, 0.780) if compact_sensitivity_auc else None,
         )
 
 
@@ -305,13 +335,27 @@ def plot_ndcg_over_epochs(
             continue
         epochs = [ep["epoch"]          for ep in history if "test" in ep]
         ndcg   = [ep["test"]["ndcg10"] for ep in history if "test" in ep]
+        colour = NDCG_EPOCH_COLOURS.get(
+            run_name, RUN_COLOURS.get(run_name, COLOUR_DEFAULT)
+        )
         ax.plot(epochs, ndcg, marker="o", markersize=6, linewidth=2.5,
-                color=RUN_COLOURS.get(run_name, COLOUR_DEFAULT),
+                color=colour,
                 label=label.replace("\n", " "))
+        ax.annotate(
+            f"{ndcg[-1]:.4f}",
+            xy=(epochs[-1], ndcg[-1]),
+            xytext=(-8, 9),
+            textcoords="offset points",
+            ha="right",
+            va="bottom",
+            fontsize=14,
+            fontweight="bold",
+            color=colour,
+        )
 
     ax.set_xlabel("Epoch")
     ax.set_ylabel("Test NDCG@10")
-    ax.legend(loc="lower right", frameon=True)
+    ax.legend(loc="center right", frameon=True)
     ax.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
     save_fig(fig, out_path)
 
@@ -412,7 +456,7 @@ def main() -> None:
 
     plot_ndcg_over_epochs(
         histories=histories,
-        runs=GROUPS["baselines_progression"],
+        runs=NDCG_EPOCH_RUNS,
         out_path=out_dir / "fig4_ndcg_over_epochs.pdf",
     )
 
