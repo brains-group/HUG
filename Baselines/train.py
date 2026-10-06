@@ -26,6 +26,8 @@ Run directory:
 from __future__ import annotations
 
 import argparse
+import contextlib
+import fcntl
 import gc
 import glob
 import itertools
@@ -87,15 +89,46 @@ def _import_model_zoo(model_name: str):
     return src
 
 
+@contextlib.contextmanager
+def _dataset_lock(data_dir: Path):
+    """
+    Exclusive lock on a processed-data directory.  Concurrent jobs (two GPUs, --pack,
+    tuning trials) share these directories; FuxiCTR writes feature_map.json before the
+    parquet files, so without the lock a second job could read a half-built dataset.
+    """
+    data_dir.mkdir(parents=True, exist_ok=True)
+    with open(data_dir / ".build.lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+
+def _build_dataset_once(feature_encoder, data_dir: Path, params: dict) -> tuple:
+    """build_dataset under the lock; a directory without the .built marker is rebuilt."""
+    from fuxictr.preprocess import build_dataset
+    with _dataset_lock(data_dir):
+        marker = data_dir / ".built"
+        if not marker.exists():
+            # Interrupted or pre-marker build: drop what FuxiCTR would otherwise reuse
+            for stale in ("feature_map.json", "holdout.parquet"):
+                (data_dir / stale).unlink(missing_ok=True)
+        paths = build_dataset(feature_encoder, **params)
+        marker.touch()
+    return paths
+
+
 def _transform_extra(data_dir: Path, name: str, csv: Path) -> str:
     """Transform an extra CSV (the holdout) with the fitted feature processor."""
     from fuxictr.preprocess.build_dataset import transform
     out = data_dir / f"{name}.parquet"
-    if not out.exists():
-        with open(data_dir / "feature_processor.pkl", "rb") as f:
-            fe = pickle.load(f)
-        ddf = fe.read_data(str(csv), data_format="csv")
-        transform(fe, fe.preprocess(ddf), name)
+    with _dataset_lock(data_dir):
+        if not out.exists():
+            with open(data_dir / "feature_processor.pkl", "rb") as f:
+                fe = pickle.load(f)
+            ddf = fe.read_data(str(csv), data_format="csv")
+            transform(fe, fe.preprocess(ddf), name)
     return str(data_dir / name)
 
 
@@ -127,7 +160,7 @@ def run(args) -> dict:
                               args.i_know_this_touches_test, run_dir.name, args.config_hash)
 
     from fuxictr.features import FeatureMap
-    from fuxictr.preprocess import FeatureProcessor, build_dataset
+    from fuxictr.preprocess import FeatureProcessor
     from fuxictr.pytorch.dataloaders import RankDataLoader
     from fuxictr.pytorch.torch_utils import seed_everything
     from fuxictr.utils import load_config, print_to_json, set_logger
@@ -136,6 +169,10 @@ def run(args) -> dict:
     params = load_config(str(CONFIG_DIR), MODELS[args.model])
     overrides = yaml.safe_load(Path(args.params).read_text()) if args.params else {}
     params.update(overrides or {})
+    # dataset_config.yaml paths are relative to Baselines/ (the repo can live anywhere)
+    for key in ("data_root", "train_data", "valid_data", "test_data"):
+        if params.get(key) and not os.path.isabs(params[key]):
+            params[key] = str(ROOT / params[key])
     params["gpu"] = args.gpu
     params["seed"] = args.seed
     if args.epochs is not None:
@@ -156,7 +193,8 @@ def run(args) -> dict:
 
     data_dir = Path(params["data_root"]) / params["dataset_id"]
     feature_encoder = FeatureProcessor(**params)
-    params["train_data"], params["valid_data"], params["test_data"] = build_dataset(feature_encoder, **params)
+    params["train_data"], params["valid_data"], params["test_data"] = _build_dataset_once(
+        feature_encoder, data_dir, params)
     feature_map = FeatureMap(params["dataset_id"], str(data_dir))
     feature_map.load(str(data_dir / "feature_map.json"), params)
 

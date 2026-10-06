@@ -4,6 +4,7 @@
 # CSVs come from Baselines/preprocess.py: canonical rows, every feature from
 # Framework/features.py (shared with HUG), holdout excluded from train.csv.
 # Extra CSV columns (row_id, bucket_*) are not features and are ignored.
+# Paths are relative to Baselines/ (train.py resolves them), so the repo can live anywhere.
 #
 # Three dataset ids over the same CSVs:
 #   kuairand_1k_seq    hist_video_ids as a raw sequence   → TransAct
@@ -12,11 +13,11 @@
 # ─────────────────────────────────────────────────────────────
 
 kuairand_1k_seq:
-    data_root: /home/dasgua3/HUG/Baselines/data/processed/
+    data_root: data/processed/
     data_format: csv
-    train_data: /home/dasgua3/HUG/Baselines/data/processed/kuairand_1k_csv/train.csv
-    valid_data: /home/dasgua3/HUG/Baselines/data/processed/kuairand_1k_csv/valid.csv
-    test_data: /home/dasgua3/HUG/Baselines/data/processed/kuairand_1k_csv/test.csv
+    train_data: data/processed/kuairand_1k_csv/train.csv
+    valid_data: data/processed/kuairand_1k_csv/valid.csv
+    test_data: data/processed/kuairand_1k_csv/test.csv
     min_categr_count: 2        # overridden per tuning trial (dataset id gets a _m<count> suffix)
 
     feature_cols:
@@ -39,11 +40,11 @@ kuairand_1k_seq:
     label_col: {name: is_click, dtype: float}
 
 kuairand_1k:
-    data_root: /home/dasgua3/HUG/Baselines/data/processed/
+    data_root: data/processed/
     data_format: csv
-    train_data: /home/dasgua3/HUG/Baselines/data/processed/kuairand_1k_csv/train.csv
-    valid_data: /home/dasgua3/HUG/Baselines/data/processed/kuairand_1k_csv/valid.csv
-    test_data: /home/dasgua3/HUG/Baselines/data/processed/kuairand_1k_csv/test.csv
+    train_data: data/processed/kuairand_1k_csv/train.csv
+    valid_data: data/processed/kuairand_1k_csv/valid.csv
+    test_data: data/processed/kuairand_1k_csv/test.csv
     min_categr_count: 2        # overridden per tuning trial (dataset id gets a _m<count> suffix)
 
     feature_cols:
@@ -65,11 +66,11 @@ kuairand_1k:
     label_col: {name: is_click, dtype: float}
 
 kuairand_1k_noseq:
-    data_root: /home/dasgua3/HUG/Baselines/data/processed/
+    data_root: data/processed/
     data_format: csv
-    train_data: /home/dasgua3/HUG/Baselines/data/processed/kuairand_1k_csv/train.csv
-    valid_data: /home/dasgua3/HUG/Baselines/data/processed/kuairand_1k_csv/valid.csv
-    test_data: /home/dasgua3/HUG/Baselines/data/processed/kuairand_1k_csv/test.csv
+    train_data: data/processed/kuairand_1k_csv/train.csv
+    valid_data: data/processed/kuairand_1k_csv/valid.csv
+    test_data: data/processed/kuairand_1k_csv/test.csv
     min_categr_count: 2        # overridden per tuning trial (dataset id gets a _m<count> suffix)
 
     feature_cols:
