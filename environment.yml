@@ -1,5 +1,9 @@
 name: hkg-env
 
+# Versions in use for the leak-free pipeline and the heavy run (spec 04).
+# FuxiCTR model-zoo sources (TransAct, WuKong, FiGNN, DCNv2) come from
+# Baselines/setup_fuxictr.sh, pinned to reczoo/FuxiCTR@b7dff73.
+
 channels:
   - pytorch
   - pyg
@@ -9,20 +13,18 @@ channels:
 
 dependencies:
   - python=3.10
-
-  - numpy
-  - pandas
-
-  - pytorch
-  - torchvision
-  - torchaudio
+  - numpy=1.26.4
+  - pandas=2.3.3
+  - scikit-learn=1.7.2
+  - pytorch=2.5.1
   - pytorch-cuda=12.1
-
-  - torch-geometric
-
+  - pyg=2.6.1            # torch_geometric; no torch_scatter / torch_sparse extensions needed
+  - pyyaml=6.0.3
   - pytest
-  - pip
-
   - tqdm
   - matplotlib
-  - scikit-learn
+  - pip
+  - pip:
+      - fuxictr==2.3.9
+      - polars==1.39.3
+      - pyarrow==23.0.1

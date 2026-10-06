@@ -28,6 +28,7 @@ import pandas as pd
 import torch
 from torch import Tensor
 
+from features import FEEDBACK_COLS
 from data_loader import (
     SPLIT_TEST, SPLIT_TRAIN, SPLIT_VAL,
     KuaiRandData, assign_split, chronological_cutoffs, compute_video_statistics,
@@ -59,6 +60,9 @@ class Interactions:
     t_val:     int
     t_test:    int
     max_prefix: int
+    # Raw columns in the same row order (row id = position): ids, time, tab,
+    # session and feedback flags — input to features.py
+    frame:     pd.DataFrame | None = None
 
     def rows(self, split: int) -> np.ndarray:
         return np.flatnonzero(self.split == split)
@@ -78,7 +82,7 @@ def build_interactions(
     """
     sm = data.session_map
     df = sm[sm["user_id"].isin(data.user_id_map) & sm["video_id"].isin(data.video_id_map)]
-    df = df[["user_id", "video_id", "session_id", "time_ms", "is_rand", "is_click"]]
+    df = df[["user_id", "video_id", "session_id", "time_ms", "is_rand", "tab"] + FEEDBACK_COLS]
     df = df.sort_values("time_ms", kind="stable").reset_index(drop=True)
 
     user  = df["user_id"].map(data.user_id_map).to_numpy(np.int64)
@@ -112,7 +116,8 @@ def build_interactions(
                 f"{(split == SPLIT_TRAIN).sum():,}", f"{(split == SPLIT_VAL).sum():,}",
                 f"{(split == SPLIT_TEST).sum():,}", t_val, t_test)
     return Interactions(user, video, time, ips, label, split,
-                        pre_start, pre_end, video[order], t_val, t_test, max_prefix)
+                        pre_start, pre_end, video[order], t_val, t_test, max_prefix,
+                        frame=df)
 
 
 # ── Snapshot schedule ─────────────────────────────────────────────────────────

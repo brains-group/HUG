@@ -63,18 +63,13 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn as nn
-from sklearn.metrics import (
-    average_precision_score,
-    log_loss,
-    ndcg_score,
-    roc_auc_score,
-)
 from torch_geometric.data import HeteroData
 from tqdm import tqdm
 
 from data_loader import SPLIT_TEST, SPLIT_TRAIN, SPLIT_VAL, KuaiRandData, KuaiRandLoader
 from gnn_encoders import SequentialGNN, StructuralGNN, SingleHGT
 from hkg_constructor import HKG_BUILD_VERSION, HKGBundle, HKGConstructor
+from metrics import Metrics, compute_metrics
 from models import AlignmentModule, CVRHead, KuaiCVRModel, SingleGNNModel
 from temporal import (
     Interactions, PrefixBatcher, SnapshotStore,
@@ -171,88 +166,6 @@ def load_checkpoint(model, device: torch.device,
 
 
 # ── Metrics ───────────────────────────────────────────────────────────────────
-
-@dataclass
-class Metrics:
-    split:     str
-    loss:      float = 0.0
-    auc:       float = 0.0
-    ap:        float = 0.0
-    logloss:   float = 0.0
-    ndcg10:    float = 0.0
-    n_samples: int   = 0
-    n_pos:     int   = 0
-    # Candidate video with 0–1 (cold) vs >=2 (warm) earlier interactions in its snapshot
-    auc_cold:  float = float("nan")
-    auc_warm:  float = float("nan")
-    n_cold:    int   = 0
-
-    def __str__(self) -> str:
-        pos_rate = self.n_pos / max(self.n_samples, 1)
-        return (
-            f"[{self.split:5s}]  loss={self.loss:.4f}  "
-            f"AUC={self.auc:.4f}  AP={self.ap:.4f}  "
-            f"LogLoss={self.logloss:.4f}  nDCG@10={self.ndcg10:.4f}  "
-            f"n={self.n_samples:,}  pos_rate={pos_rate:.3f}  "
-            f"AUC cold/warm={self.auc_cold:.4f}/{self.auc_warm:.4f} (n_cold={self.n_cold:,})"
-        )
-
-
-def _per_user_ndcg_at_k(
-    user_idxs: np.ndarray,
-    labels:    np.ndarray,
-    scores:    np.ndarray,
-    k:         int = 10,
-) -> float:
-    """
-    Compute NDCG@k averaged over users.
-
-    Only users with ≥2 interactions and at least one positive label contribute
-    to the average. Users with a single interaction trivially achieve 1.0 and
-    would inflate the metric; users with no positives have undefined NDCG.
-    """
-    unique_users = np.unique(user_idxs)
-    per_user_ndcg: list[float] = []
-
-    for uid in unique_users:
-        mask  = user_idxs == uid
-        u_lbl = labels[mask]
-        u_scr = scores[mask]
-
-        if u_lbl.sum() == 0 or len(u_lbl) < 2:
-            continue
-
-        try:
-            n = min(k, len(u_lbl))
-            score = float(ndcg_score(u_lbl.reshape(1, -1), u_scr.reshape(1, -1), k=n))
-            per_user_ndcg.append(score)
-        except Exception:
-            continue
-
-    return float(np.mean(per_user_ndcg)) if per_user_ndcg else 0.0
-
-
-def compute_metrics(split: str, labels: np.ndarray,
-                    probas: np.ndarray, loss: float,
-                    user_idxs: np.ndarray | None = None,
-                    cold: np.ndarray | None = None) -> Metrics:
-    m = Metrics(split=split, loss=loss,
-                n_samples=len(labels), n_pos=int(labels.sum()))
-    if m.n_pos == 0 or m.n_pos == m.n_samples:
-        logger.warning("%s split has no label variance — skipping AUC/AP", split)
-        return m
-    m.auc     = float(roc_auc_score(labels, probas))
-    m.ap      = float(average_precision_score(labels, probas))
-    m.logloss = float(log_loss(labels, probas))
-    if user_idxs is not None:
-        m.ndcg10 = _per_user_ndcg_at_k(user_idxs, labels, probas, k=10)
-    if cold is not None:
-        m.n_cold = int(cold.sum())
-        for mask, attr in ((cold, "auc_cold"), (~cold, "auc_warm")):
-            if 0 < labels[mask].sum() < mask.sum():
-                setattr(m, attr, float(roc_auc_score(labels[mask], probas[mask])))
-    return m
-
 
 # ── Memory-safe relation edge index ───────────────────────────────────────────
 
@@ -567,7 +480,7 @@ def run_split(
     user_idxs_np = np.concatenate(all_users)
     avg_loss     = total_loss / max(len(labels_np), 1)
     return compute_metrics(split, labels_np, probas_np, avg_loss, user_idxs=user_idxs_np,
-                           cold=np.concatenate(all_cold))
+                           buckets={"coldwarm": np.where(np.concatenate(all_cold), "cold", "warm")})
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
