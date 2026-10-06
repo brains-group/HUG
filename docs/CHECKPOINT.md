@@ -1,7 +1,8 @@
 # HUG — Revision Checkpoint
 
-**Last updated:** 2026-10-06
-**Branch:** `docs/technical-report-and-revision-plan` (committed; spec 01 landed on top of `cabf8c9`)
+**Last updated:** 2026-10-06 (specs 05–06)
+**Branch:** `docs/technical-report-and-revision-plan`; spec 06 developed on `spec06-datasets`
+(worktree `~/HUG-spec06`)
 **Purpose:** current state of the revision for whoever acts as architect / reviewer. Read this
 first, then `docs/TECHNICAL_REPORT.md` (findings F1–F14) and `docs/REVISION_WORKFLOW.md`.
 
@@ -240,6 +241,31 @@ unlike TransAct before its statistics fix. Encoders are still frozen at random i
 
 **These are 1-epoch smoke numbers, not results.** Every number in the paper and under `runs/`
 from before this checkpoint was produced under the leaky protocol and is void.
+
+## Specs 05–06 status (2026-10-06)
+
+The "Model as implemented" section above describes the pre-spec-03 code; HUG is now the
+spec 03/04 model (`Framework/hug.py`, `hug_train.py`) with the spec 05 fusion heads
+(`Framework/fusion.py`). Current write-ups:
+
+- **Spec 05** (fusion): `docs/specs/05-sparse-fusion-results.md`.
+- **Spec 06** (datasets): `docs/specs/06-datasets-results.md`.
+  - Adapters in `Framework/datasets/` (KuaiRand bitwise unchanged; MIND 20% users; ZhihuRec
+    12.5% users), label-timed inputs, `day_snap` splits (ZhihuRec falls back to the exact cut),
+    pre-window histories, baseline CSVs/configs per dataset, a dataset dimension in the queue
+    (KuaiRand hashes unchanged).
+  - MIND/ZhihuRec heavy-run entries are in `experiments/heavy_run.yaml` but **not launched**:
+    they need the GPU smoke, the run-time estimate and the user's sign-off.
+
+Run on a new dataset (from the repo root):
+
+```bash
+python Framework/fingerprint.py --dataset mind --out runs/heavy/data_fingerprint_mind.json  # builds the bundle cache
+python Baselines/preprocess.py --dataset mind                                                # baseline CSVs
+python Framework/main.py --model-type hug --dataset mind --device cuda:0 --run-dir runs/dev/mind_N4
+python Baselines/train.py --model TransAct --dataset mind --gpu 0 --run-dir runs/dev/mind_TransAct
+HUG_REAL_DATA=1 python -m pytest Framework/test_datasets.py -k real                          # real-data parity
+```
 
 ## Spec 01 results (validation only, 1 epoch, seed 42)
 
