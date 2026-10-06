@@ -130,6 +130,8 @@ def data_fingerprint_hash() -> str:
         for k in sorted(d.buckets):
             put(d.buckets[k].astype("U16"))
         for k, v in d.node_data.items():
+            if k == "meta_x" and not v:          # added in spec 06; empty for KuaiRand
+                continue
             put(v.numpy() if hasattr(v, "numpy") else v)
         for t in d.store.rel_master:
             put(t.numpy())

@@ -55,6 +55,7 @@ class InputEncoder(nn.Module):
         video_feat_dim:    int,
         cat_vocab_sizes:   list[int],
         meta_counts:       dict[str, int],
+        meta_feat_dims:    dict[str, int] | None = None,
     ) -> None:
         super().__init__()
         self.d = d
@@ -70,13 +71,25 @@ class InputEncoder(nn.Module):
             if t in ("user", "video") or hasattr(self, t):
                 raise ValueError(f"metadata node type {t!r} clashes with an InputEncoder attribute")
             setattr(self, t, _emb(n, d))
+        # optional frozen features per metadata type (e.g. TransE), projected and added
+        self.meta_proj = nn.ModuleDict({t: nn.Linear(k, d, bias=False)
+                                        for t, k in (meta_feat_dims or {}).items()})
 
     def set_node_data(self, user_vocab: Tensor, user_x: Tensor, user_onehot: Tensor,
-                      video_vocab: Tensor, video_cat: Tensor) -> None:
+                      video_vocab: Tensor, video_cat: Tensor,
+                      meta_x: dict[str, Tensor] | None = None) -> None:
         for name, t in (("user_vocab", user_vocab), ("user_x", user_x),
                         ("user_onehot", user_onehot), ("video_vocab", video_vocab),
                         ("video_cat", video_cat)):
             self.register_buffer(name, t, persistent=False)
+        for t, x in (meta_x or {}).items():
+            self.register_buffer(f"meta_x_{t}", x, persistent=False)
+
+    def meta_table(self, t: str) -> Tensor:
+        h = getattr(self, t).weight
+        if t in self.meta_proj:
+            h = h + self.meta_proj[t](getattr(self, f"meta_x_{t}"))
+        return h
 
     def users(self, idx: Tensor | None = None) -> Tensor:
         sel = (lambda t: t) if idx is None else (lambda t: t[idx])
@@ -94,7 +107,7 @@ class InputEncoder(nn.Module):
 
     def tables(self, video_x: Tensor) -> dict[str, Tensor]:
         return {"user": self.users(), "video": self.videos(video_x),
-                **{t: getattr(self, t).weight for t in self.meta_types}}
+                **{t: self.meta_table(t) for t in self.meta_types}}
 
     def l2_touched(self, user_idx: Tensor, video_idx: Tensor) -> Tensor:
         """Squared norm of the ID-embedding rows a batch touches (users, videos incl. history)."""

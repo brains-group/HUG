@@ -160,6 +160,16 @@ class BaselineTables:
     item_num:   pd.DataFrame | None = None # item node order, static numeric columns
 
 
+class Const:
+    """Picklable constant callable (cached bundles cannot hold closures)."""
+
+    def __init__(self, value) -> None:
+        self.value = value
+
+    def __call__(self):
+        return self.value
+
+
 # ── The bundle ────────────────────────────────────────────────────────────────
 
 @dataclass
@@ -190,6 +200,7 @@ class DatasetBundle:
     user_sample:   tuple[float, int] | None = None
     baseline_fn:   Callable[[], BaselineTables] | None = None   # built on demand (preprocess.py)
     stats:         dict = field(default_factory=dict)            # adapter-side counts for reports
+    meta_features: dict = field(default_factory=dict)  # node type → frozen float features
 
     def baseline_tables(self) -> BaselineTables:
         if self.baseline_fn is None:

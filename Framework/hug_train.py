@@ -202,6 +202,7 @@ def prepare(args, data: KuaiRandData | None = None, bundle: HKGBundle | None = N
         "video_vocab": torch.from_numpy(video_vocab),
         "video_cat": torch.from_numpy(video_cat),
         "cat_sizes": cat_sizes,
+        "meta_x": {t: torch.from_numpy(np.asarray(x, np.float32)) for t, x in ds.meta_features.items()},
     }
 
     return HugData(
@@ -278,9 +279,10 @@ def build(args, d: HugData) -> HUGModel:
         args.emb_dim, int(nd["user_vocab"].max()) + 1, nd["user_x"].shape[1], onehot_vocab,
         int(nd["video_vocab"].max()) + 1, video_feat_dim, nd["cat_sizes"],
         {t: d.graph.counts[t] for t in d.graph.node_types[2:]},
+        {t: x.shape[1] for t, x in nd.get("meta_x", {}).items()},
     )
     inp.set_node_data(nd["user_vocab"], nd["user_x"], nd["user_onehot"],
-                      nd["video_vocab"], nd["video_cat"])
+                      nd["video_vocab"], nd["video_cat"], nd.get("meta_x"))
     gcn = None
     if not args.no_graph:
         gcn = RelLightGCN(d.graph.relations, args.graph_layers, eps=args.cl_eps,
