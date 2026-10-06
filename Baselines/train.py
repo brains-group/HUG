@@ -195,9 +195,16 @@ def run(args) -> dict:
     hold_m, _ = _score(model, hold_gen, pd.read_csv(CSV_DIR / "holdout.csv", usecols=ref_cols), "holdout")
 
     test_m = None
+    dry_substitute = bool(args.eval_test and args.max_steps)
     if args.eval_test:
-        test_gen = RankDataLoader(feature_map, stage="test", **params).make_iterator()
-        test_m, test_p = _score(model, test_gen, pd.read_csv(CSV_DIR / "test.csv", usecols=ref_cols), "test")
+        if dry_substitute:       # dry runs exercise the final_eval path on val rows: no test label is read
+            test_gen = _Limited(RankDataLoader(feature_map, stage="train", **params).make_iterator()[1],
+                                DRY_RUN_EVAL_BATCHES)
+            test_ref = pd.read_csv(CSV_DIR / "valid.csv", usecols=ref_cols)
+        else:
+            test_gen = RankDataLoader(feature_map, stage="test", **params).make_iterator()
+            test_ref = pd.read_csv(CSV_DIR / "test.csv", usecols=ref_cols)
+        test_m, test_p = _score(model, test_gen, test_ref, "test")
         np.savez(run_dir / "test_preds.npz", **test_p)
 
     logging.info(str(val_m))
@@ -207,6 +214,7 @@ def run(args) -> dict:
         "seed": args.seed, "config_hash": args.config_hash,
         "val": asdict(val_m), "holdout": asdict(hold_m),
         "test": asdict(test_m) if test_m is not None else None,
+        "test_is_dry_run_substitute": dry_substitute,
         "best_epoch": None, "params": {k: v for k, v in params.items()
                                        if isinstance(v, (int, float, str, bool, type(None)))},
         "tuned": overrides, "n_params": n_params,

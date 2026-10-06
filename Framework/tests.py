@@ -1657,3 +1657,18 @@ class TestBaselineParityReal:
         assert not np.isin(hold_ids, train_ids).any()
         assert len(train_ids) + len(hold_ids) == len(d.inter.rows(SPLIT_TRAIN))
 
+
+
+def test_dry_run_final_eval_reads_no_test_rows(tmp_data_dir, tmp_path):
+    """--eval-test with --max-steps (queue dry run) scores validation rows, never test rows."""
+    import hug_train
+    run_dir = tmp_path / "runs" / "job"
+    args = _hug_args(data_dir=str(tmp_data_dir), run_dir=str(run_dir), max_steps=2,
+                     eval_test=True, i_know_this_touches_test=True, max_epochs=1)
+    args.min_interactions = 1
+    hug_train.run(args)
+    out = json.loads((run_dir / "final_metrics.json").read_text())
+    assert out["test_is_dry_run_substitute"] is True
+    rows = np.load(run_dir / "test_preds.npz")["row_id"]
+    val_rows = np.load(run_dir / "val_preds.npz")["row_id"]
+    assert set(rows) <= set(val_rows)

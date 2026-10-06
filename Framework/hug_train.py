@@ -187,8 +187,9 @@ def prepare(args, data: KuaiRandData | None = None, bundle: HKGBundle | None = N
             if cache_dir:
                 save_hkg(bundle, cache_dir)
     store = None
+    real_test = args.eval_test and not args.max_steps
     rows_used = np.r_[train_rows, holdout, inter.rows(SPLIT_VAL),
-                      inter.rows(SPLIT_TEST) if args.eval_test else np.zeros(0, np.int64)]
+                      inter.rows(SPLIT_TEST) if real_test else np.zeros(0, np.int64)]
     needed = set(np.unique(snap[rows_used]).tolist())
     if not args.no_graph:
         from main import _merged_edge_index
@@ -505,8 +506,12 @@ def run(args) -> None:
     np.savez(run_dir / "val_preds.npz", **val_p)
     hold_m, _ = evaluate("holdout", model, d, d.holdout, snaps, batcher, args, device, max_snaps)
     test_m = None
+    dry_substitute = bool(args.eval_test and args.max_steps)
     if args.eval_test:
-        test_m, test_p = evaluate("test", model, d, d.test_rows, snaps, batcher, args, device)
+        # Dry runs exercise the final_eval path on validation rows: no test label is read
+        rows = d.val_rows if dry_substitute else d.test_rows
+        test_m, test_p = evaluate("test", model, d, rows, snaps, batcher, args, device,
+                                  max_snaps if dry_substitute else None)
         np.savez(run_dir / "test_preds.npz", **test_p)
     logger.info("%s\n%s", val_m, hold_m)
 
@@ -516,6 +521,7 @@ def run(args) -> None:
         "seed": args.seed, "config_hash": args.config_hash,
         "val": asdict(val_m), "holdout": asdict(hold_m),
         "test": asdict(test_m) if test_m is not None else None,
+        "test_is_dry_run_substitute": dry_substitute,
         "best_epoch": state["best_epoch"] if state else None,
         "history": state["history"] if state else None,
         "params": {k: v for k, v in vars(args).items() if isinstance(v, (int, float, str, bool, type(None)))},
