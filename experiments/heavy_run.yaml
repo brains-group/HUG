@@ -1,0 +1,464 @@
+# Heavy-run plan (Spec 04, "Heavy-run plan"). Prepared and dry-run; not executed by Spec 04.
+#
+#   python scripts/run_queue.py experiments/heavy_run.yaml --gpus 0,1 [--pack]
+#   python scripts/run_queue.py experiments/heavy_run.yaml --dry-run --max-steps 50
+#   python scripts/run_queue.py experiments/heavy_run.yaml --skip-optional   # drop DCNv2
+#
+# Job fields:
+#   name        unique; the run dir is runs/heavy/<name>/
+#   kind        hug | baseline | tune_hug | tune_baseline | final_eval
+#   args        extra CLI args; "{best:<tune_job>}" expands to --params runs/heavy/<tune_job>/best.yaml
+#               (and makes the job depend on that tuning job)
+#   seed        passed as --seed for hug/baseline (tuning jobs carry --seed in args)
+#   memory      heavy | light (with --pack, two light jobs may share a GPU)
+#   depends_on  explicit dependencies (implicit ones: {best:...} and final_eval's "of")
+#   of          final_eval only: the stage-1 job whose val-selected best.pt is scored on test
+#   group       aggregation label (scripts/aggregate.py groups seeds by it)
+#   optional    true for jobs that may be dropped with --skip-optional
+#
+# Stage 1 (val only): tuning, HUG arms, baselines. Stage 2: final_eval jobs, the only jobs
+# that touch test (the queue adds --eval-test and a one-time token; never put it in args).
+# To run Stage 1 alone: --only 'tune_*' --only 'hug_*' --only 'baseline_*'.
+
+defaults:
+  data_dir: KuaiRand-1K/data
+  # Run once by the queue if <runs_root>/data_fingerprint.json is missing.
+  fingerprint_cmd: "{python} Framework/fingerprint.py --data-dir {data_dir} --out {out}"
+  # Expected wall-clock minutes per job, used for the ETA in status.json until jobs of that
+  # kind have finished (observed durations then take over).
+  # TODO(W6.6): fill in from the W6 timing runs; null = unknown (excluded from the ETA).
+  expected_minutes:
+    tune_hug: null        # TODO: 16 trials
+    tune_baseline: null   # TODO: 16 trials
+    hug: null             # TODO
+    baseline: null        # TODO
+    final_eval: null      # TODO
+  memory:
+    hug: heavy
+    tune_hug: heavy
+    baseline: light
+    tune_baseline: light
+  # Extra args appended in --dry-run (after --max-steps): one trial per tuning job (W6.4).
+  dry_run_args:
+    tune_hug: "--trials 1"
+    tune_baseline: "--trials 1"
+
+jobs:
+  # ── Stage 1a: tuning (16 trials each, val only) ──
+  - name: tune_hug_N4
+    kind: tune_hug
+    args: "--arm N4 --trials 16 --seed 0"
+    memory: heavy
+    group: tune_hug_N4
+    depends_on: []
+  - name: tune_hug_N1
+    kind: tune_hug
+    args: "--arm N1 --trials 16 --seed 0"
+    memory: heavy
+    group: tune_hug_N1
+    depends_on: []
+  - name: tune_baseline_TransAct
+    kind: tune_baseline
+    args: "--model TransAct --trials 16 --seed 0"
+    memory: light
+    group: tune_TransAct
+    depends_on: []
+  - name: tune_baseline_WuKong
+    kind: tune_baseline
+    args: "--model WuKong --trials 16 --seed 0"
+    memory: light
+    group: tune_WuKong
+    depends_on: []
+  - name: tune_baseline_FiGNN
+    kind: tune_baseline
+    args: "--model FiGNN --trials 16 --seed 0"
+    memory: light
+    group: tune_FiGNN
+    depends_on: []
+  - name: tune_baseline_DCNv2
+    kind: tune_baseline
+    args: "--model DCNv2 --trials 16 --seed 0"
+    memory: light
+    group: tune_DCNv2
+    depends_on: []
+    optional: true
+
+  # ── Stage 1b: HUG arms at the tuned N4 settings (arm switches on top) ──
+  - name: hug_N4_s42
+    kind: hug
+    args: "{best:tune_hug_N4}"
+    seed: 42
+    memory: heavy
+    model: HUG
+    arm: N4
+    group: N4
+    depends_on: []
+  - name: hug_N4_s43
+    kind: hug
+    args: "{best:tune_hug_N4}"
+    seed: 43
+    memory: heavy
+    model: HUG
+    arm: N4
+    group: N4
+    depends_on: []
+  - name: hug_N4_s44
+    kind: hug
+    args: "{best:tune_hug_N4}"
+    seed: 44
+    memory: heavy
+    model: HUG
+    arm: N4
+    group: N4
+    depends_on: []
+  - name: hug_N1_s42
+    kind: hug
+    args: "{best:tune_hug_N4} --no-graph"
+    seed: 42
+    memory: heavy
+    model: HUG
+    arm: N1
+    group: N1
+    depends_on: []
+  - name: hug_N1_s43
+    kind: hug
+    args: "{best:tune_hug_N4} --no-graph"
+    seed: 43
+    memory: heavy
+    model: HUG
+    arm: N1
+    group: N1
+    depends_on: []
+  - name: hug_N1_s44
+    kind: hug
+    args: "{best:tune_hug_N4} --no-graph"
+    seed: 44
+    memory: heavy
+    model: HUG
+    arm: N1
+    group: N1
+    depends_on: []
+  - name: hug_N3_s42
+    kind: hug
+    args: "{best:tune_hug_N4} --cl-weight 0"
+    seed: 42
+    memory: heavy
+    model: HUG
+    arm: N3
+    group: N3
+    depends_on: []
+  - name: hug_N3_s43
+    kind: hug
+    args: "{best:tune_hug_N4} --cl-weight 0"
+    seed: 43
+    memory: heavy
+    model: HUG
+    arm: N3
+    group: N3
+    depends_on: []
+  - name: hug_N3_s44
+    kind: hug
+    args: "{best:tune_hug_N4} --cl-weight 0"
+    seed: 44
+    memory: heavy
+    model: HUG
+    arm: N3
+    group: N3
+    depends_on: []
+  - name: hug_N0_s42
+    kind: hug
+    args: "{best:tune_hug_N4} --no-graph --no-seq"
+    seed: 42
+    memory: heavy
+    model: HUG
+    arm: N0
+    group: N0
+    depends_on: []
+  - name: hug_N2_s42
+    kind: hug
+    args: "{best:tune_hug_N4} --no-seq"
+    seed: 42
+    memory: heavy
+    model: HUG
+    arm: N2
+    group: N2
+    depends_on: []
+  - name: hug_N4frozen_s42
+    kind: hug
+    args: "{best:tune_hug_N4} --freeze-graph"
+    seed: 42
+    memory: heavy
+    model: HUG
+    arm: N4-frozen
+    group: N4-frozen
+    depends_on: []
+
+  # ── Stage 1b: N1 at its own tuned settings (the TransAct-like comparison) ──
+  - name: hug_N1own_s42
+    kind: hug
+    args: "{best:tune_hug_N1} --no-graph"
+    seed: 42
+    memory: heavy
+    model: HUG
+    arm: N1
+    group: N1-own
+    depends_on: []
+  - name: hug_N1own_s43
+    kind: hug
+    args: "{best:tune_hug_N1} --no-graph"
+    seed: 43
+    memory: heavy
+    model: HUG
+    arm: N1
+    group: N1-own
+    depends_on: []
+  - name: hug_N1own_s44
+    kind: hug
+    args: "{best:tune_hug_N1} --no-graph"
+    seed: 44
+    memory: heavy
+    model: HUG
+    arm: N1
+    group: N1-own
+    depends_on: []
+
+  # ── Stage 1c: baselines at their best tuned settings, 3 seeds each ──
+  - name: baseline_TransAct_s42
+    kind: baseline
+    args: "--model TransAct {best:tune_baseline_TransAct}"
+    seed: 42
+    memory: light
+    model: TransAct
+    group: TransAct
+    depends_on: []
+  - name: baseline_TransAct_s43
+    kind: baseline
+    args: "--model TransAct {best:tune_baseline_TransAct}"
+    seed: 43
+    memory: light
+    model: TransAct
+    group: TransAct
+    depends_on: []
+  - name: baseline_TransAct_s44
+    kind: baseline
+    args: "--model TransAct {best:tune_baseline_TransAct}"
+    seed: 44
+    memory: light
+    model: TransAct
+    group: TransAct
+    depends_on: []
+  - name: baseline_WuKong_s42
+    kind: baseline
+    args: "--model WuKong {best:tune_baseline_WuKong}"
+    seed: 42
+    memory: light
+    model: WuKong
+    group: WuKong
+    depends_on: []
+  - name: baseline_WuKong_s43
+    kind: baseline
+    args: "--model WuKong {best:tune_baseline_WuKong}"
+    seed: 43
+    memory: light
+    model: WuKong
+    group: WuKong
+    depends_on: []
+  - name: baseline_WuKong_s44
+    kind: baseline
+    args: "--model WuKong {best:tune_baseline_WuKong}"
+    seed: 44
+    memory: light
+    model: WuKong
+    group: WuKong
+    depends_on: []
+  - name: baseline_FiGNN_s42
+    kind: baseline
+    args: "--model FiGNN {best:tune_baseline_FiGNN}"
+    seed: 42
+    memory: light
+    model: FiGNN
+    group: FiGNN
+    depends_on: []
+  - name: baseline_FiGNN_s43
+    kind: baseline
+    args: "--model FiGNN {best:tune_baseline_FiGNN}"
+    seed: 43
+    memory: light
+    model: FiGNN
+    group: FiGNN
+    depends_on: []
+  - name: baseline_FiGNN_s44
+    kind: baseline
+    args: "--model FiGNN {best:tune_baseline_FiGNN}"
+    seed: 44
+    memory: light
+    model: FiGNN
+    group: FiGNN
+    depends_on: []
+  - name: baseline_DCNv2_s42
+    kind: baseline
+    args: "--model DCNv2 {best:tune_baseline_DCNv2}"
+    seed: 42
+    memory: light
+    model: DCNv2
+    group: DCNv2
+    depends_on: []
+    optional: true
+  - name: baseline_DCNv2_s43
+    kind: baseline
+    args: "--model DCNv2 {best:tune_baseline_DCNv2}"
+    seed: 43
+    memory: light
+    model: DCNv2
+    group: DCNv2
+    depends_on: []
+    optional: true
+  - name: baseline_DCNv2_s44
+    kind: baseline
+    args: "--model DCNv2 {best:tune_baseline_DCNv2}"
+    seed: 44
+    memory: light
+    model: DCNv2
+    group: DCNv2
+    depends_on: []
+    optional: true
+
+  # ── Stage 2: score each stage-1 config/seed once on test (val-selected best.pt) ──
+  - name: final_eval_hug_N4_s42
+    kind: final_eval
+    of: hug_N4_s42
+    memory: heavy
+    depends_on: []
+  - name: final_eval_hug_N4_s43
+    kind: final_eval
+    of: hug_N4_s43
+    memory: heavy
+    depends_on: []
+  - name: final_eval_hug_N4_s44
+    kind: final_eval
+    of: hug_N4_s44
+    memory: heavy
+    depends_on: []
+  - name: final_eval_hug_N1_s42
+    kind: final_eval
+    of: hug_N1_s42
+    memory: heavy
+    depends_on: []
+  - name: final_eval_hug_N1_s43
+    kind: final_eval
+    of: hug_N1_s43
+    memory: heavy
+    depends_on: []
+  - name: final_eval_hug_N1_s44
+    kind: final_eval
+    of: hug_N1_s44
+    memory: heavy
+    depends_on: []
+  - name: final_eval_hug_N3_s42
+    kind: final_eval
+    of: hug_N3_s42
+    memory: heavy
+    depends_on: []
+  - name: final_eval_hug_N3_s43
+    kind: final_eval
+    of: hug_N3_s43
+    memory: heavy
+    depends_on: []
+  - name: final_eval_hug_N3_s44
+    kind: final_eval
+    of: hug_N3_s44
+    memory: heavy
+    depends_on: []
+  - name: final_eval_hug_N0_s42
+    kind: final_eval
+    of: hug_N0_s42
+    memory: heavy
+    depends_on: []
+  - name: final_eval_hug_N2_s42
+    kind: final_eval
+    of: hug_N2_s42
+    memory: heavy
+    depends_on: []
+  - name: final_eval_hug_N4frozen_s42
+    kind: final_eval
+    of: hug_N4frozen_s42
+    memory: heavy
+    depends_on: []
+  - name: final_eval_hug_N1own_s42
+    kind: final_eval
+    of: hug_N1own_s42
+    memory: heavy
+    depends_on: []
+  - name: final_eval_hug_N1own_s43
+    kind: final_eval
+    of: hug_N1own_s43
+    memory: heavy
+    depends_on: []
+  - name: final_eval_hug_N1own_s44
+    kind: final_eval
+    of: hug_N1own_s44
+    memory: heavy
+    depends_on: []
+  - name: final_eval_baseline_TransAct_s42
+    kind: final_eval
+    of: baseline_TransAct_s42
+    memory: light
+    depends_on: []
+  - name: final_eval_baseline_TransAct_s43
+    kind: final_eval
+    of: baseline_TransAct_s43
+    memory: light
+    depends_on: []
+  - name: final_eval_baseline_TransAct_s44
+    kind: final_eval
+    of: baseline_TransAct_s44
+    memory: light
+    depends_on: []
+  - name: final_eval_baseline_WuKong_s42
+    kind: final_eval
+    of: baseline_WuKong_s42
+    memory: light
+    depends_on: []
+  - name: final_eval_baseline_WuKong_s43
+    kind: final_eval
+    of: baseline_WuKong_s43
+    memory: light
+    depends_on: []
+  - name: final_eval_baseline_WuKong_s44
+    kind: final_eval
+    of: baseline_WuKong_s44
+    memory: light
+    depends_on: []
+  - name: final_eval_baseline_FiGNN_s42
+    kind: final_eval
+    of: baseline_FiGNN_s42
+    memory: light
+    depends_on: []
+  - name: final_eval_baseline_FiGNN_s43
+    kind: final_eval
+    of: baseline_FiGNN_s43
+    memory: light
+    depends_on: []
+  - name: final_eval_baseline_FiGNN_s44
+    kind: final_eval
+    of: baseline_FiGNN_s44
+    memory: light
+    depends_on: []
+  - name: final_eval_baseline_DCNv2_s42
+    kind: final_eval
+    of: baseline_DCNv2_s42
+    memory: light
+    depends_on: []
+    optional: true
+  - name: final_eval_baseline_DCNv2_s43
+    kind: final_eval
+    of: baseline_DCNv2_s43
+    memory: light
+    depends_on: []
+    optional: true
+  - name: final_eval_baseline_DCNv2_s44
+    kind: final_eval
+    of: baseline_DCNv2_s44
+    memory: light
+    depends_on: []
+    optional: true

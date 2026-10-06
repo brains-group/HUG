@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
 # =============================================================================
-# run_experiments.sh  —  Full experiment sweep
+# run_experiments.sh  —  LEGACY sweep for the spec-01-era dual-GNN model
 # =============================================================================
+#
+# Superseded by the heavy-run plan: experiments/heavy_run.yaml, launched with
+#   python scripts/run_queue.py experiments/heavy_run.yaml
+# (see docs/HEAVY_RUN.md).  HUG-Unified (--model-type single) is retired from
+# the comparison (spec 04 W2): HUG's N2 arm is the single-graph control.
+# Kept so earlier dual-model runs can be reproduced.
 #
 # USAGE
 #   bash run_experiments.sh --data-dir /path/to/KuaiRand-1K/data
@@ -66,7 +72,7 @@ if [[ -z "$DATA_DIR" ]]; then
     echo "    node-A:  bash run_experiments.sh --data-dir /path/to/data --device cuda:0 --group 0"
     echo "    node-B:  bash run_experiments.sh --data-dir /path/to/data --device cuda:0 --group 1"
     echo ""
-    echo "    Group 0: B1 B2 B3  (model progression)"
+    echo "    Group 0: B2 B3  (model progression)"
     echo "    Group 1: C1 D1 E1 F1 F2 F3 F4  (ablations + sensitivity)"
     echo ""
     echo "  NOTE: --cache-dir should point to a shared filesystem path so both"
@@ -100,6 +106,7 @@ run() {
     echo "  STARTING: $label"
     echo "════════════════════════════════════════════════════════════"
     python "$SCRIPT_DIR/main.py" \
+        --model-type dual \
         --data-dir   "$DATA_DIR" \
         --cache-dir  "$CACHE_DIR" \
         --output-dir "$OUT_DIR" \
@@ -114,12 +121,6 @@ run() {
 # =============================================================================
 # [B] Main model progression  (all use IPS=on, recency-gate=on)
 # =============================================================================
-
-# B1 — HUG-Unified: single HGT over full HKG, no KG alignment
-#      run_name: 1k_single_kg0_ips1_rg1
-# in_group 0 && run "B1  HUG-Unified  (single HGT, no KGA)" \
-#     --model-type single \
-#     --kg-alignment 0
 
 # B2 — HUG-Dual (KGA Off): dual GNN + cross-attention, no KG gate
 #      run_name: 1k_dual_kg0_ips1_rg1
@@ -143,10 +144,6 @@ run() {
 #     --model-type dual \
 #     --kg-alignment $KG_DIM \
 #     --no-ips
-#  in_group 0 && run "B2  HUG-Unified  (single HGT, no KGA)" \
-#      --model-type single \
-#      --kg-alignment 0 \
-#      --no-ips
 # =============================================================================
 # [D] Recency-gate ablation  (full model, recency gate disabled)
 # =============================================================================
@@ -215,7 +212,6 @@ echo "  ALL RUNS COMPLETE"
 echo "  Results are in: $OUT_DIR/"
 echo ""
 echo "  Model progression:"
-echo "    $OUT_DIR/1k_single_kg0_ips1_rg1/       → B1  HUG-Unified"
 echo "    $OUT_DIR/1k_dual_kg0_ips1_rg1/         → B2  HUG-Dual (KGA Off)"
 echo "    $OUT_DIR/1k_dual_kg${KG_DIM}_ips1_rg1/        → B3  HUG-Dual (KGA On)  FULL MODEL"
 echo ""
