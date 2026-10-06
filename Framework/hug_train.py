@@ -154,7 +154,8 @@ def prepare(args, data: KuaiRandData | None = None, bundle: HKGBundle | None = N
     ctx_num = asof_video_statistics(frame)
     # Per-view evidence for fusion heads (spec 05): strictly earlier counts only
     item_meta = data.video_basic[["video_id"] + METADATA_NEIGHBOURS]
-    evidence = view_evidence(frame, item_meta, inter.user, inter.label)
+    # n_S's history term is the length of the encoder's own history (hist_seq[hs:he])
+    evidence = view_evidence(frame, item_meta, he - hs)
 
     # Vocabularies from the training window only (time < t_val)
     tw = inter.time < t_val
@@ -297,8 +298,7 @@ def build(args, d: HugData) -> HUGModel:
                      dropout=args.dropout, fusion=args.fusion, fusion_args=args)
     if hasattr(model.head, "n_ref"):
         # 95th percentile of each view's evidence over training rows only
-        ref = np.percentile(d.evidence[d.train_rows], 95, axis=0)
-        model.head.n_ref.copy_(torch.as_tensor(np.maximum(ref, 1e-6), dtype=torch.float32))
+        model.head.set_n_ref(np.percentile(d.evidence[d.train_rows], 95, axis=0))
     return model
 
 
@@ -530,7 +530,7 @@ def train(args, d: HugData, model: HUGModel, device, run_dir: Path) -> dict:
                 opt.step()
                 if hasattr(model.head, "renormalize"):
                     model.head.renormalize()
-                    dead = model.head.track_and_resample(state["steps"] + 1)
+                    dead = model.head.track_and_resample(state["steps"] + 1, optimizer=opt)
                 n = len(b["user"])
                 tot += out["bce"].item() * n
                 cl_tot += out["cl"].item() * n

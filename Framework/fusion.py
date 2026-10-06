@@ -65,7 +65,7 @@ class ConcatFusion(nn.Sequential):
         super().__init__(*mlp_head(in_dim, dropout))
 
     def fuse(self, e_G, e_S, ctx, evidence) -> dict:
-        parts = [e_G] + ([e_S] if e_S is not None else []) + [ctx]
+        parts = [e for e in (e_G, e_S) if e is not None] + [ctx]
         logit = super().forward(torch.cat(parts, dim=-1)).squeeze(-1)
         return {"logit": logit, "aux_loss": _zero(logit), "stats": {}}
 
@@ -84,10 +84,38 @@ class _Projected(nn.Module):
         return self.proj_G(e_G), self.proj_S(e_S)
 
 
+class _EvidenceNorm:
+    """
+    Normalised per-view evidence s_v = clip(n_v / n_ref,v, 0, 1) (spec 05 B4), shared by
+    sparse and evgate.  n_ref (95th percentile over training rows) is a checkpointed
+    buffer; training-mode forward refuses to run until set_n_ref has been called.
+    """
+
+    def _init_n_ref(self) -> None:
+        self.register_buffer("n_ref", torch.ones(2))
+        self.register_buffer("n_ref_set", torch.zeros((), dtype=torch.bool))
+
+    @torch.no_grad()
+    def set_n_ref(self, ref) -> None:
+        ref = torch.as_tensor(ref, dtype=torch.float32).clamp_min(1e-6)
+        self.n_ref.copy_(ref.to(self.n_ref.device))
+        self.n_ref_set.fill_(True)
+
+    def scaled_evidence(self, evidence: Tensor) -> Tensor:
+        if self.training and not bool(self.n_ref_set):
+            raise RuntimeError(f"{type(self).__name__}: n_ref was never set; call set_n_ref() "
+                               "with the training-row 95th percentiles before training")
+        return (evidence / self.n_ref.clamp_min(1e-6)).clamp(0, 1)
+
+
 # ── gate / evgate ─────────────────────────────────────────────────────────────
 
-class GateFusion(_Projected):
-    """g = σ(W[p_G ‖ p_S]); z = [g⊙p_G + (1−g)⊙p_S ‖ ctx].  evidence=True: evgate."""
+class GateFusion(_EvidenceNorm, _Projected):
+    """
+    g = σ(W[p_G ‖ p_S]); z = [g⊙p_G + (1−g)⊙p_S ‖ ctx].
+    evidence=True (evgate): g = σ(MLP([p_G ‖ p_S ‖ s_G ‖ s_S])) with the same normalised
+    evidence s_v as sparse.
+    """
 
     def __init__(self, g_dim, s_dim, ctx_dim, fdim, dropout, evidence: bool = False,
                  gate_hidden: int = 64) -> None:
@@ -99,10 +127,12 @@ class GateFusion(_Projected):
         else:
             self.gate = nn.Linear(2 * fdim, fdim)
         self.head = nn.Sequential(*mlp_head(fdim + ctx_dim, dropout))
+        if evidence:
+            self._init_n_ref()
 
     def fuse(self, e_G, e_S, ctx, evidence) -> dict:
         p_G, p_S = self.project(e_G, e_S)
-        gin = [p_G, p_S] + ([evidence] if self.use_evidence else [])
+        gin = [p_G, p_S] + ([self.scaled_evidence(evidence)] if self.use_evidence else [])
         g = torch.sigmoid(self.gate(torch.cat(gin, dim=-1)))
         z = torch.cat([g * p_G + (1 - g) * p_S, ctx], dim=-1)
         logit = self.head(z).squeeze(-1)
@@ -177,7 +207,7 @@ class MISAFusion(_Projected):
 
 # ── sparse shared/private (proposed) ──────────────────────────────────────────
 
-class SparseSPFusion(_Projected):
+class SparseSPFusion(_EvidenceNorm, _Projected):
     """
     Shared + view-private sparse codes over unit-norm dictionaries (spec 05 B).
 
@@ -204,7 +234,7 @@ class SparseSPFusion(_Projected):
         self.enc = nn.ModuleDict({v: nn.Linear(fdim, m_shared + m_private) for v in ("G", "S")})
         self.head = nn.Sequential(*mlp_head(m_shared + 2 * m_private + ctx_dim, dropout))
         # n_ref per view: 95th percentile of n_v over training rows (set by the trainer)
-        self.register_buffer("n_ref", torch.ones(2))
+        self._init_n_ref()
         # firing bookkeeping for dead-atom resampling (steps since last fired)
         for name, m in (("idle_sh", m_shared), ("idle_G", m_private), ("idle_S", m_private)):
             self.register_buffer(name, torch.zeros(m, dtype=torch.long), persistent=False)
@@ -215,7 +245,7 @@ class SparseSPFusion(_Projected):
         """[B, 2] per-row private budgets for (G, S)."""
         if self.k_schedule == "fixed":
             return torch.full_like(evidence, self.k_fixed, dtype=torch.long)
-        s = (evidence / self.n_ref.clamp_min(1e-6)).clamp(0, 1)
+        s = self.scaled_evidence(evidence)
         return (self.k_min + torch.round((self.k_max - self.k_min) * s)).long()
 
     @staticmethod
@@ -280,11 +310,13 @@ class SparseSPFusion(_Projected):
             D.data = F.normalize(D.data, dim=-1)
 
     @torch.no_grad()
-    def track_and_resample(self, step: int, every: int = 1000, dead_after: int = 10_000) -> dict:
+    def track_and_resample(self, step: int, every: int = 1000, dead_after: int = 10_000,
+                           optimizer: torch.optim.Optimizer | None = None) -> dict:
         """
         Update steps-since-fired per atom; every `every` steps re-initialise atoms idle for
         `dead_after` steps towards the residual of a random high-reconstruction-error row
-        (encoder row reset to match).  Returns dead fractions per dictionary.
+        (encoder row reset to match, and the optimiser's moments for those rows zeroed).
+        Returns dead fractions per dictionary.
         """
         if not self._last:
             return {}
@@ -296,12 +328,19 @@ class SparseSPFusion(_Projected):
         dead = {k: float((getattr(self, n) >= dead_after).float().mean())
                 for k, n in (("shared", "idle_sh"), ("G", "idle_G"), ("S", "idle_S"))}
         if step % every == 0:
-            self.resample_dead(dead_after)
+            self.resample_dead(dead_after, optimizer)
         return dead
 
     @torch.no_grad()
-    def resample_dead(self, dead_after: int) -> int:
+    def resample_dead(self, dead_after: int, optimizer: torch.optim.Optimizer | None = None) -> int:
         n = 0
+
+        def reset_state(param: Tensor, row: int) -> None:
+            st = optimizer.state.get(param, {}) if optimizer is not None else {}
+            for key in ("exp_avg", "exp_avg_sq", "max_exp_avg_sq"):
+                if key in st and st[key].dim() > 0:
+                    st[key][row] = 0
+
         p, err = self._last["p"], self._last["rec_err"]
         for v in ("G", "S"):
             for block, idle_name in (("sh", "idle_sh"), (v, f"idle_{v}")):
@@ -315,20 +354,23 @@ class SparseSPFusion(_Projected):
                     target = F.normalize(p[v][row].flatten(), dim=0)
                     D = self.D_sh if block == "sh" else self.D_pr[v]
                     D.data[atom] = target
+                    reset_state(D, atom)
                     offset = 0 if block == "sh" else self.m_sh
                     for vv in (("G", "S") if block == "sh" else (v,)):
                         self.enc[vv].weight.data[offset + atom] = target * 0.1
                         self.enc[vv].bias.data[offset + atom] = 0.0
+                        reset_state(self.enc[vv].weight, offset + atom)
+                        reset_state(self.enc[vv].bias, offset + atom)
                     idle[atom] = 0
                     n += 1
         return n
 
 
-def build_fusion(name: str, g_dim: int, s_dim: int | None, ctx_dim: int, args) -> nn.Module:
+def build_fusion(name: str, g_dim: int | None, s_dim: int | None, ctx_dim: int, args) -> nn.Module:
     """Construct the head selected by --fusion (and its variant flags)."""
     if name == "concat":
-        return ConcatFusion(g_dim + (s_dim or 0) + ctx_dim, args.dropout)
-    if s_dim is None:
+        return ConcatFusion((g_dim or 0) + (s_dim or 0) + ctx_dim, args.dropout)
+    if g_dim is None or s_dim is None:
         raise ValueError(f"--fusion {name} needs both views; it cannot be combined with --no-graph/--no-seq")
     fd = args.fusion_dim
     if name == "gate":

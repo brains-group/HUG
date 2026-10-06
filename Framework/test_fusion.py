@@ -31,7 +31,7 @@ def _views(b=32):
 # 1 ─────────────────────────────────────────────────────────────────────────────
 def test_topk_exact_and_monotone():
     f = _sparse()
-    f.n_ref.copy_(torch.tensor([4.0, 4.0]))
+    f.set_n_ref([4.0, 4.0])
     e_G, e_S, ctx, ev = _views()
     p = dict(zip(("G", "S"), f.project(e_G, e_S)))
     sh, pr = f.codes(p, ev)
@@ -48,27 +48,50 @@ def test_topk_exact_and_monotone():
     k = f.k_private(grid)[:, 0]
     assert (k[1:] >= k[:-1]).all()
     fixed = _sparse(k_schedule="fixed", k_private_fixed=5)
+    fixed.set_n_ref([4.0, 4.0])
     assert (fixed.k_private(ev) == 5).all()
 
 
 # 2 ─────────────────────────────────────────────────────────────────────────────
 def test_evidence_causal_with_ties():
-    from features import view_evidence
+    from features import click_history, view_evidence
     rng = np.random.default_rng(0)
     n = 300
-    fr = pd.DataFrame({"video_id": rng.integers(0, 6, n), "time_ms": rng.integers(0, 30, n)})
-    meta = pd.DataFrame({"video_id": range(6), "author_id": [0, 0, 1, 1, 2, 2]})
+    fr = pd.DataFrame({"video_id": rng.integers(0, 8, n), "time_ms": rng.integers(0, 30, n)})
+    # videos 6 and 7 have no author: they must get metadata_evidence = 0, not a pooled count
+    meta = pd.DataFrame({"video_id": range(8), "author_id": [0, 0, 1, 1, 2, 2, np.nan, np.nan]})
     user = rng.integers(0, 4, n)
     click = rng.integers(0, 2, n)
-    ev = view_evidence(fr, meta, user, click)
-    auth = fr.video_id.map(dict(zip(meta.video_id, meta.author_id))).to_numpy()
-    for i in range(n):
-        t = fr.time_ms[i]
-        item = int(((fr.video_id == fr.video_id[i]) & (fr.time_ms < t)).sum())
-        a = int(((auth == auth[i]) & (fr.time_ms.to_numpy() < t)).sum())
-        uc = int(((user == user[i]) & (click == 1) & (fr.time_ms.to_numpy() < t)).sum())
-        assert ev[i, 0] == pytest.approx(np.log1p(item) + np.log1p(a), abs=1e-5)
-        assert ev[i, 1] == pytest.approx(np.log1p(uc) + np.log1p(item), abs=1e-5)
+    for max_len in (1_000, 3):                      # untruncated and truncated histories
+        _, hs, he = click_history(user, fr.time_ms.to_numpy(), np.arange(n), click, max_len)
+        ev = view_evidence(fr, meta, he - hs)
+        auth = fr.video_id.map(dict(zip(meta.video_id, meta.author_id))).to_numpy()
+        tt = fr.time_ms.to_numpy()
+        for i in range(n):
+            t = tt[i]
+            item = int(((fr.video_id == fr.video_id[i]) & (tt < t)).sum())
+            a = 0 if np.isnan(auth[i]) else int(((auth == auth[i]) & (tt < t)).sum())
+            uc = min(int(((user == user[i]) & (click == 1) & (tt < t)).sum()), max_len)
+            assert ev[i, 0] == pytest.approx(np.log1p(item) + np.log1p(a), abs=1e-5)
+            assert ev[i, 1] == pytest.approx(np.log1p(uc) + np.log1p(item), abs=1e-5)
+
+
+def test_missing_metadata_neighbour_contributes_zero():
+    from features import metadata_evidence
+    fr = pd.DataFrame({"video_id": [0, 1, 2, 3, 0], "time_ms": [0, 1, 2, 3, 4]})
+    meta = pd.DataFrame({"video_id": [0, 1, 2, 3], "author_id": [5, np.nan, np.nan, np.nan]})
+    me = metadata_evidence(fr, meta)
+    np.testing.assert_allclose(me, np.log1p([0, 0, 0, 0, 1]))
+
+
+def test_sequence_evidence_uses_encoder_history(hug_data):
+    """n_S's history term is log1p of the encoder's history length (hist_end − hist_start)."""
+    from features import asof_group_count
+    d = hug_data
+    fr = d.inter.frame
+    item_prior = np.log1p(asof_group_count(pd.factorize(fr["video_id"])[0], fr["time_ms"].to_numpy()))
+    np.testing.assert_allclose(d.evidence[:, 1],
+                               np.log1p(d.hist_end - d.hist_start) + item_prior, atol=1e-5)
 
 
 def test_n_ref_from_training_rows_only(loaded_data, timed_bundle):
@@ -83,10 +106,60 @@ def test_n_ref_from_training_rows_only(loaded_data, timed_bundle):
     assert np.array_equal(d.evidence[d.train_rows], d2.evidence[d2.train_rows])
 
 
+@pytest.mark.parametrize("fusion", ["sparse", "evgate"])
+def test_training_without_n_ref_raises(fusion):
+    from fusion import build_fusion
+    args = _hug_args(fusion=fusion)
+    head = build_fusion(fusion, 6, 4, 3, args)
+    e_G, e_S, ctx, ev = _views()
+    head.train()
+    with pytest.raises(RuntimeError, match="n_ref"):
+        head.fuse(e_G, e_S, ctx, ev)
+    head.set_n_ref([2.0, 3.0])
+    head.fuse(e_G, e_S, ctx, ev)                 # fine once set
+
+
+def test_evgate_uses_normalised_evidence():
+    from fusion import build_fusion
+    head = build_fusion("evgate", 6, 4, 3, _hug_args(fusion="evgate"))
+    head.set_n_ref([2.0, 3.0])
+    head.eval()
+    e_G, e_S, ctx, ev = _views()
+    # evidence at or above n_ref saturates at s_v = 1, so its scale no longer matters
+    a = head.fuse(e_G, e_S, ctx, torch.full_like(ev, 10.0))["logit"]
+    b = head.fuse(e_G, e_S, ctx, torch.full_like(ev, 1e6))["logit"]
+    assert torch.equal(a, b)
+    c = head.fuse(e_G, e_S, ctx, torch.zeros_like(ev))["logit"]
+    assert not torch.equal(a, c)
+
+
+@pytest.mark.parametrize("fusion", ["sparse", "evgate"])
+def test_n_ref_round_trips_checkpoint_and_resume(hug_data, tmp_path, fusion):
+    import hug_train
+    args = _hug_args(fusion=fusion, max_epochs=1, patience=10)
+    model = hug_train.build(args, hug_data)
+    model.head.set_n_ref([1.25, 2.5])            # distinctive, not the data's value
+    hug_train.train(args, hug_data, model, torch.device("cpu"), tmp_path)
+    for ck in ("best.pt", "last.pt"):
+        sd = torch.load(tmp_path / ck, weights_only=False)
+        sd = sd["model"] if "model" in sd else sd
+        fresh = hug_train.build(args, hug_data)
+        fresh.load_state_dict(sd)
+        assert torch.equal(fresh.head.n_ref, torch.tensor([1.25, 2.5]))
+        assert bool(fresh.head.n_ref_set)
+    # --resume: a rebuilt model (n_ref from the data) picks the stored n_ref back up
+    args2 = _hug_args(fusion=fusion, max_epochs=2, patience=10, resume=True)
+    m2 = hug_train.build(args2, hug_data)
+    assert not torch.equal(m2.head.n_ref, torch.tensor([1.25, 2.5]))
+    state = hug_train.train(args2, hug_data, m2, torch.device("cpu"), tmp_path)
+    assert state["epoch"] == 2
+    assert torch.equal(m2.head.n_ref, torch.tensor([1.25, 2.5]))
+
+
 # 3 ─────────────────────────────────────────────────────────────────────────────
 def test_atoms_unit_norm_after_step():
     f = _sparse()
-    f.n_ref.copy_(torch.tensor([3.0, 3.0]))
+    f.set_n_ref([3.0, 3.0])
     opt = torch.optim.Adam(f.parameters(), lr=0.1)
     out = f.fuse(*_views())
     (out["logit"].sum() + out["aux_loss"]).backward()
@@ -109,7 +182,7 @@ def _grads(f, **w):
 
 def test_gradient_routing():
     f = _sparse()
-    f.n_ref.copy_(torch.tensor([3.0, 3.0]))
+    f.set_n_ref([3.0, 3.0])
     g = _grads(f, w_rec=1.0)
     assert not any(v for n, v in g.items() if n.startswith("proj_"))      # detached target
     assert g["D_sh"] and g["D_pr.G"] and g["enc.G.weight"]
@@ -141,18 +214,33 @@ def test_losses_behave():
 # 6 ─────────────────────────────────────────────────────────────────────────────
 def test_dead_atom_resampling():
     f = _sparse()
-    f.n_ref.copy_(torch.tensor([3.0, 3.0]))
+    f.set_n_ref([3.0, 3.0])
     with torch.no_grad():                   # private-G atom 0 can never fire …
         f.enc["G"].weight[f.m_sh + 0] = 0.0
         f.enc["G"].bias[f.m_sh + 0] = -100.0
     f.fuse(*_views())
+    opt = torch.optim.Adam(f.parameters(), lr=1e-3)
+    out = f.fuse(*_views())
+    (out["logit"].sum() + out["aux_loss"]).backward()
+    opt.step()                                  # populate Adam moments
+    f.fuse(*_views())
     f.idle_G[0] = 9_999                     # … and has been idle long enough to be dead
     live_before = f.D_pr["G"].data[1:].clone()
     old0 = f.D_pr["G"].data[0].clone()
-    f.track_and_resample(step=1000, every=1000, dead_after=10_000)
+    st_D, st_W = opt.state[f.D_pr["G"]], opt.state[f.enc["G"].weight]
+    live_m = st_D["exp_avg"][1:].clone()
+    f.track_and_resample(step=1000, every=1000, dead_after=10_000, optimizer=opt)
     assert not torch.equal(f.D_pr["G"].data[0], old0)
     assert torch.equal(f.D_pr["G"].data[1:], live_before)
     assert f.idle_G[0] == 0
+    # optimiser moments zeroed for the reset dictionary and encoder rows only
+    row = f.m_sh + 0
+    for key in ("exp_avg", "exp_avg_sq"):
+        assert (st_D[key][0] == 0).all()
+        assert (st_W[key][row] == 0).all()
+        assert opt.state[f.enc["G"].bias][key][row] == 0
+    assert torch.equal(st_D["exp_avg"][1:], live_m)
+    assert st_W["exp_avg_sq"][f.m_sh + 1:].abs().sum() > 0
 
 
 # 7 ─────────────────────────────────────────────────────────────────────────────

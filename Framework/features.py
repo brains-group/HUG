@@ -201,39 +201,41 @@ def asof_group_count(group: np.ndarray, time: np.ndarray) -> np.ndarray:
             - np.searchsorted(keys, group * span, "left")).astype(np.int64)
 
 
-def metadata_evidence(frame: pd.DataFrame, item_meta: pd.DataFrame) -> np.ndarray:
+def metadata_evidence(frame: pd.DataFrame, item_meta: pd.DataFrame,
+                      neighbours: list[str] | None = None) -> np.ndarray:
     """
     log1p of the as-of interaction count of each row's item's primary metadata
-    neighbour(s) (METADATA_NEIGHBOURS; max over them).  `item_meta` maps
-    video_id to the neighbour columns.
+    neighbour(s) (max over `neighbours`, default METADATA_NEIGHBOURS).  `item_meta`
+    maps video_id to the neighbour columns.  A missing neighbour (NaN) contributes
+    0: missing values are never pooled into a shared placeholder group.
     """
-    m = frame[["video_id"]].merge(item_meta[["video_id"] + METADATA_NEIGHBOURS],
+    neighbours = METADATA_NEIGHBOURS if neighbours is None else neighbours
+    m = frame[["video_id"]].merge(item_meta[["video_id"] + neighbours],
                                   on="video_id", how="left")
     t = frame["time_ms"].to_numpy(np.int64)
     out = np.zeros(len(frame), dtype=np.int64)
-    for col in METADATA_NEIGHBOURS:
-        codes = pd.factorize(m[col].fillna(-1))[0]
-        out = np.maximum(out, asof_group_count(codes, t))
+    for col in neighbours:
+        codes = pd.factorize(m[col])[0]            # NaN → -1
+        ok = codes >= 0
+        if ok.any():
+            cnt = np.zeros(len(frame), dtype=np.int64)
+            cnt[ok] = asof_group_count(codes[ok], t[ok])
+            out = np.maximum(out, cnt)
     return np.log1p(out).astype(np.float32)
 
 
-def view_evidence(frame: pd.DataFrame, item_meta: pd.DataFrame, user: np.ndarray,
-                  click: np.ndarray) -> np.ndarray:
+def view_evidence(frame: pd.DataFrame, item_meta: pd.DataFrame, hist_len: np.ndarray,
+                  neighbours: list[str] | None = None) -> np.ndarray:
     """
     Per-row causal evidence for each view, float32 [N, 2]:
       n_G = log1p(item prior interactions) + metadata_evidence
-      n_S = log1p(user prior clicks)       + log1p(item prior interactions)
-    Every count uses rows with a strictly earlier timestamp (ties excluded).
+      n_S = log1p(hist_len)                + log1p(item prior interactions)
+    `hist_len` is the length of the history the sequence encoder attends over
+    (end − start from click_history), so the two cannot drift apart.  Interaction
+    counts use rows with a strictly earlier timestamp (ties excluded).
     """
     t = frame["time_ms"].to_numpy(np.int64)
     item_prior = np.log1p(asof_group_count(pd.factorize(frame["video_id"])[0], t))
-    clicked = np.asarray(click) == 1
-    # user prior clicks: as-of count over clicked rows only
-    user = np.asarray(user, np.int64)
-    span = int(t.max() - t.min()) + 1
-    ck = np.sort(user[clicked] * span + (t[clicked] - t.min()))
-    user_prior = (np.searchsorted(ck, user * span + (t - t.min()), "left")
-                  - np.searchsorted(ck, user * span, "left"))
-    n_g = item_prior + metadata_evidence(frame, item_meta)
-    n_s = np.log1p(user_prior) + item_prior
+    n_g = item_prior + metadata_evidence(frame, item_meta, neighbours)
+    n_s = np.log1p(np.asarray(hist_len, np.int64)) + item_prior
     return np.stack([n_g, n_s], axis=1).astype(np.float32)
