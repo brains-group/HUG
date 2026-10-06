@@ -74,7 +74,7 @@ from tqdm import tqdm
 
 from data_loader import SPLIT_TEST, SPLIT_TRAIN, SPLIT_VAL, KuaiRandData, KuaiRandLoader
 from gnn_encoders import SequentialGNN, StructuralGNN, SingleHGT
-from hkg_constructor import HKGBundle, HKGConstructor
+from hkg_constructor import HKG_BUILD_VERSION, HKGBundle, HKGConstructor
 from models import AlignmentModule, CVRHead, KuaiCVRModel, SingleGNNModel
 from temporal import (
     Interactions, PrefixBatcher, SnapshotStore,
@@ -105,10 +105,19 @@ def _hkg_cache_path(cache_dir: Path) -> Path:
 
 
 def save_hkg(bundle: HKGBundle, cache_dir: Path) -> None:
+    """Write atomically: concurrent runs never see a partly written cache."""
+    import os
+    import tempfile
     cache_dir.mkdir(parents=True, exist_ok=True)
     path = _hkg_cache_path(cache_dir)
-    with open(path, "wb") as f:
-        pickle.dump(bundle, f, protocol=pickle.HIGHEST_PROTOCOL)
+    fd, tmp = tempfile.mkstemp(dir=cache_dir, prefix=path.name, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            pickle.dump(bundle, f, protocol=pickle.HIGHEST_PROTOCOL)
+        os.replace(tmp, path)
+    except BaseException:
+        os.unlink(tmp)
+        raise
     logger.info("HKG cached -> %s  (%.1f MB)", path, path.stat().st_size / 1e6)
 
 
@@ -121,13 +130,11 @@ def load_hkg(cache_dir: Path, data: KuaiRandData) -> HKGBundle | None:
     t0 = time.time()
     with open(path, "rb") as f:
         bundle = pickle.load(f)
-    et = ("user", "interacted", "video")
     ok = (
-        et in bundle.full_graph.edge_types
-        and "edge_time" in bundle.full_graph[et]
+        getattr(bundle, "build_version", None) == HKG_BUILD_VERSION
+        and bundle.n_users    == len(data.user_id_map)
         and bundle.n_videos   == len(data.video_id_map)
         and bundle.n_sessions == data.n_sessions
-        and bundle.full_graph[et].edge_index.shape[1] == len(data.log_combined)
     )
     if not ok:
         logger.warning("Cached HKG does not match this data — rebuilding.")
@@ -267,17 +274,23 @@ REVERSE_REL_MAP = {et: rid + len(REL_MAP) for et, rid in REL_MAP.items()}
 NUM_RELATIONS   = 2 * len(REL_MAP)
 
 
+STATIC_EDGE_TIME = torch.iinfo(torch.long).min   # metadata edges: always visible
+
+
 def _merged_edge_index(
-    g:                  HeteroData,
-    forward_ids:        dict,
-    reverse_ids:        dict,
-    device:             torch.device,
-    max_edges_per_type: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
+    g:           HeteroData,
+    forward_ids: dict,
+    reverse_ids: dict,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Concatenate edge types into one global index for a homogeneous-style
     encoder.  Node layout: [user | video | author | category].  Each type in
     `reverse_ids` is also emitted flipped under its reverse id.
+
+    Returns (edge_index [2, E], edge_type [E], edge_time [E]).  edge_time is
+    the interaction time for behavioural edges — inherited unchanged by their
+    reverse edges — and STATIC_EDGE_TIME for metadata edges, so a snapshot is
+    simply `edge_time < cutoff`.
     """
     n_user   = g["user"].num_nodes
     n_video  = g["video"].num_nodes
@@ -290,44 +303,38 @@ def _merged_edge_index(
         "category": n_user + n_video + n_author,
     }
 
-    parts, type_parts = [], []
+    parts, type_parts, time_parts = [], [], []
     for et, type_id in forward_ids.items():
         if et not in g.edge_types:
             continue
-        ei = g[et].edge_index.cpu()
-        if ei.shape[1] > max_edges_per_type:
-            idx = torch.randperm(ei.shape[1])[:max_edges_per_type]
-            ei  = ei[:, idx]
+        store = g[et]
+        ei    = store.edge_index.cpu()
+        etime = (store.edge_time.cpu() if "edge_time" in store
+                 else torch.full((ei.shape[1],), STATIC_EDGE_TIME, dtype=torch.long))
         shifted    = ei.clone()
         shifted[0] += offsets[et[0]]
         shifted[1] += offsets[et[2]]
-        parts.append(shifted)
-        type_parts.append(torch.full((shifted.shape[1],), type_id, dtype=torch.long))
-        if et in reverse_ids:
-            parts.append(shifted.flip(0))
-            type_parts.append(torch.full((shifted.shape[1],), reverse_ids[et], dtype=torch.long))
+        ids = [type_id] + ([reverse_ids[et]] if et in reverse_ids else [])
+        for i, tid in enumerate(ids):
+            parts.append(shifted if i == 0 else shifted.flip(0))
+            type_parts.append(torch.full((shifted.shape[1],), tid, dtype=torch.long))
+            time_parts.append(etime)
 
     if not parts:
-        return (torch.zeros(2, 0, dtype=torch.long, device=device),
-                torch.zeros(0,    dtype=torch.long, device=device))
-
-    return (torch.cat(parts,      dim=1).to(device),
-            torch.cat(type_parts, dim=0).to(device))
+        return (torch.zeros(2, 0, dtype=torch.long), torch.zeros(0, dtype=torch.long),
+                torch.zeros(0, dtype=torch.long))
+    return torch.cat(parts, dim=1), torch.cat(type_parts), torch.cat(time_parts)
 
 
-def build_relation_edge_index(
-    sg:                 HeteroData,
-    device:             torch.device,
-    max_edges_per_type: int = 200_000,
-) -> tuple[torch.Tensor, torch.Tensor]:
+def build_relation_edge_index(sg: HeteroData) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
-    Merged (edge_index, relation_types) for the structural R-GCN: the
-    REL_MAP relations plus their reverses (NUM_RELATIONS in total).
+    Master (edge_index, relation_type, edge_time) for the structural R-GCN:
+    every REL_MAP edge plus its reverse (NUM_RELATIONS relations), uncapped.
 
     h_all layout inside StructuralGNN:
         [user(0..n_user) | video(n_user..) | author(..) | category(..)]
     """
-    return _merged_edge_index(sg, REL_MAP, REVERSE_REL_MAP, device, max_edges_per_type)
+    return _merged_edge_index(sg, REL_MAP, REVERSE_REL_MAP)
 
 
 # ── Model factory ─────────────────────────────────────────────────────────────
@@ -381,18 +388,15 @@ def build_model(data: KuaiRandData, bundle: HKGBundle,
 
 
 def build_full_relation_edge_index(
-    bundle:             HKGBundle,
-    device:             torch.device,
-    max_edges_per_type: int = 200_000,
-) -> tuple[torch.Tensor, torch.Tensor]:
+    bundle: HKGBundle,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
-    Merged edge index over ALL HKG edge types for the single HGT, plus the
+    Master edge index over ALL HKG edge types for the single HGT, plus the
     reverse of every type except next_in_session (ordered by definition).
     Type ids follow SingleHGT.EDGE_TYPES, then SingleHGT.REVERSE_TYPE_IDS.
     """
     forward_ids = {et: i for i, et in enumerate(SingleHGT.EDGE_TYPES)}
-    return _merged_edge_index(bundle.full_graph, forward_ids, SingleHGT.REVERSE_TYPE_IDS,
-                              device, max_edges_per_type)
+    return _merged_edge_index(bundle.full_graph, forward_ids, SingleHGT.REVERSE_TYPE_IDS)
 
 
 def build_single_model(data: KuaiRandData, bundle: HKGBundle,
@@ -446,12 +450,12 @@ def encode_snapshot(model, store: SnapshotStore, k: int, model_type: str) -> dic
     deterministic.  Returns embeddings on the head device.
     """
     view = store.view(k)
-    rel_ei, rel_t = store.rel[k]
     if model_type == "single":
         enc = model.hgt
     else:
         enc = model.structural_gnn
     enc_dev = next(enc.parameters()).device
+    rel_ei, rel_t = store.rel(k, enc_dev)
 
     was_training = model.training
     model.eval()
@@ -459,14 +463,14 @@ def encode_snapshot(model, store: SnapshotStore, k: int, model_type: str) -> dic
     if enc_dev.type == "cuda":
         torch.cuda.reset_peak_memory_stats(enc_dev)
     if model_type == "single":
-        emb = model.encode_graph(view.full_graph, rel_ei.to(enc_dev), rel_t.to(enc_dev))
+        emb = model.encode_graph(view.full_graph, rel_ei, rel_t)
     else:
         emb = model.encode_graph(view.structural_graph, view.sequential_graph,
-                                 rel_ei.to(enc_dev), rel_t.to(enc_dev))
+                                 rel_ei, rel_t)
     model.train(was_training)
     peak_gb = torch.cuda.max_memory_allocated(enc_dev) / 1e9 if enc_dev.type == "cuda" else 0.0
     store.encode_log.append({"snapshot": int(k), "seconds": round(time.time() - t0, 3),
-                             "peak_gpu_gb": round(peak_gb, 3)})
+                             "peak_gpu_gb": round(peak_gb, 3), "n_edges": int(rel_ei.shape[1])})
     head_dev = model.head_device
     return {k_: v.to(head_dev) for k_, v in emb.items()}
 
@@ -611,9 +615,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--snapshot-hours",   type=float, default=24.0,
                    help="Graph snapshot period: interactions are encoded from the "
                         "graph as of the start of their period")
-    p.add_argument("--warmup-hours",     type=float, default=0.0,
+    p.add_argument("--warmup-hours",     type=float, default=None,
                    help="Training interactions this close to the start of the log "
-                        "are used only as history, not as training targets")
+                        "are used only as history, not as training targets. "
+                        "Defaults to --snapshot-hours (snapshot 0's graph is empty).")
 
     # Model
     p.add_argument("--kg-alignment", type=int, default=0)
@@ -648,10 +653,6 @@ def parse_args() -> argparse.Namespace:
                    help="GPU index for StructuralGNN (default 0)")
     p.add_argument("--gpu-sequential", type=int, default=1,
                    help="GPU index for SequentialGNN (default 1)")
-    # Memory controls
-    p.add_argument("--max-edges",   type=int, default=200_000,
-                   help="Max edges per relation type sampled for R-GCN.")
-
     return p.parse_args()
 
 
@@ -741,7 +742,6 @@ def main() -> None:
     print(f"║  amp       : {str(use_amp):<46} ║")
     print(f"║  epochs    : {args.epochs:<46} ║")
     print(f"║  batch     : {args.batch_size:<46} ║")
-    print(f"║  max_edges : {args.max_edges:<46} ║")
     print(f"║  hidden    : {args.hidden_dim}  out: {args.out_dim:<40} ║")
     print(f"║  run_name  : {make_run_name(args):<46} ║")
     print(f"║  no_ips    : {str(args.no_ips):<46} ║")
@@ -769,6 +769,8 @@ def main() -> None:
     snap_of    = assign_snapshots(inter.time, boundaries)
 
     train_rows = inter.rows(SPLIT_TRAIN)
+    if args.warmup_hours is None:
+        args.warmup_hours = args.snapshot_hours
     if args.warmup_hours > 0:
         warm_end   = inter.time.min() + int(args.warmup_hours * 3_600_000)
         train_rows = train_rows[inter.time[train_rows] >= warm_end]
@@ -795,16 +797,19 @@ def main() -> None:
     else:
         tqdm.write(f"      Loaded from cache  n_videos={bundle.n_videos:,}  n_sessions={bundle.n_sessions:,}")
 
-    if args.model_type == "single":
-        rel_builder = lambda b: build_full_relation_edge_index(b, torch.device("cpu"), args.max_edges)
-    else:
-        rel_builder = lambda b: build_relation_edge_index(b.structural_graph, torch.device("cpu"), args.max_edges)
+    # One master relation index, built once; snapshots are time masks over it
     if args.no_edges:
-        rel_builder = lambda b: (torch.zeros(2, 0, dtype=torch.long), torch.zeros(0, dtype=torch.long))
+        rel_master = None
+    elif args.model_type == "single":
+        rel_master = build_full_relation_edge_index(bundle)
+    else:
+        rel_master = build_relation_edge_index(bundle.structural_graph)
+    if rel_master is not None:
+        tqdm.write(f"      Master relation index: {rel_master[0].shape[1]:,} edges")
     eval_rows = np.r_[train_rows, val_rows, test_rows] if args.eval_test else np.r_[train_rows, val_rows]
     needed = set(np.unique(snap_of[eval_rows]).tolist())
     t0 = time.time()
-    store = SnapshotStore(bundle, data, boundaries, rel_builder, needed=needed,
+    store = SnapshotStore(bundle, data, boundaries, rel_master, needed=needed,
                           drop_edges=args.no_edges)
     tqdm.write(f"      {len(needed)} snapshots prepared in {time.time()-t0:.1f}s")
     batcher = PrefixBatcher(inter)

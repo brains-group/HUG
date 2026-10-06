@@ -25,7 +25,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 from torch_geometric.data import HeteroData
-from torch_geometric.nn import GATConv, RGCNConv, GatedGraphConv
+from torch_geometric.nn import RGCNConv, GatedGraphConv
 from torch_geometric.utils import softmax as pyg_softmax
 
 
@@ -36,7 +36,7 @@ def _id_embedding(n: int, dim: int) -> nn.Embedding:
     return emb
 
 
-# ── Structural GNN (R-GCN with optional GAT refinement) ───────────────────────
+# ── Structural GNN (R-GCN) ─────────────────────────────────────────────────────
 
 class StructuralGNN(nn.Module):
     """
@@ -112,9 +112,6 @@ class StructuralGNN(nn.Module):
             for _ in range(num_layers)
         ])
 
-        # ── GAT refinement (video-only, post R-GCN) ───────────────────────────
-        self.gat = GATConv(hidden_dim, hidden_dim // 4, heads=4, dropout=dropout)
-
         # ── Output projections ─────────────────────────────────────────────────
         self.user_out  = nn.Linear(hidden_dim, out_dim)
         self.video_out = nn.Linear(hidden_dim, out_dim)
@@ -130,7 +127,6 @@ class StructuralGNN(nn.Module):
         graph: HeteroData,
         relation_edge_index: Tensor,   # [2, E] merged over all relation types
         relation_types:      Tensor,   # [E]    integer relation id per edge
-        video_video_edge_index: Tensor | None = None,  # for GAT pass
     ) -> dict[str, Tensor]:
         """
         Parameters
@@ -141,8 +137,6 @@ class StructuralGNN(nn.Module):
             All structural edges concatenated, shape [2, E].
         relation_types : Tensor
             Relation type index per edge, shape [E].
-        video_video_edge_index : Tensor | None
-            Optional video co-occurrence edges for the GAT refinement pass.
 
         Returns
         -------
@@ -173,10 +167,6 @@ class StructuralGNN(nn.Module):
         # Split back into per-type tensors
         h_user_out  = h_all[:n_user]
         h_video_out = h_all[n_user : n_user + n_video]
-
-        # Optional GAT refinement on video nodes only (video–video co-engagement)
-        if video_video_edge_index is not None and video_video_edge_index.shape[1] > 0:
-            h_video_out = F.relu(self.gat(h_video_out, video_video_edge_index))
 
         return {
             "user":  self.user_out(h_user_out),

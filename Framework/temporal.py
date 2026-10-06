@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Callable
 
 import numpy as np
 import pandas as pd
@@ -137,9 +136,10 @@ def assign_snapshots(time: np.ndarray, boundaries: np.ndarray) -> np.ndarray:
 
 class SnapshotStore:
     """
-    Per-snapshot inputs, precomputed once: video node features from the
-    snapshot's window and the (sampled) relation edge index for the encoder.
-    Graph views are cut from the timed bundle on demand.
+    Per-snapshot inputs.  Video node features from each snapshot's window are
+    precomputed once.  The encoder's relation edges are one master index
+    (built once, uncapped) and a snapshot is the mask edge_time < boundary;
+    no per-snapshot copies are stored.  Graph views are cut on demand.
     """
 
     def __init__(
@@ -147,7 +147,7 @@ class SnapshotStore:
         bundle:      HKGBundle,
         data:        KuaiRandData,
         boundaries:  np.ndarray,
-        rel_builder: Callable[[HKGBundle], tuple[Tensor, Tensor]],
+        rel_master:  tuple[Tensor, Tensor, Tensor] | None,
         needed:      set[int] | None = None,
         drop_edges:  bool = False,
     ) -> None:
@@ -156,7 +156,11 @@ class SnapshotStore:
         self.drop_edges = drop_edges        # features-only control: views carry no edges
         self.encode_log: list[dict] = []
         self.video_x:   dict[int, Tensor] = {}
-        self.rel:       dict[int, tuple[Tensor, Tensor]] = {}
+        if rel_master is None:                    # no edges at all
+            rel_master = (torch.zeros(2, 0, dtype=torch.long),
+                          torch.zeros(0, dtype=torch.long), torch.zeros(0, dtype=torch.long))
+        self.rel_master = rel_master
+        self._rel_dev: dict[torch.device, tuple[Tensor, Tensor, Tensor]] = {}
 
         vb = data.video_basic[data.video_basic["video_id"].isin(data.video_id_map)].copy()
         vb["node_idx"] = vb["video_id"].map(data.video_id_map)
@@ -169,8 +173,16 @@ class SnapshotStore:
             cutoff = int(boundaries[k])
             stats  = compute_video_statistics(log[log["time_ms"] < cutoff])
             self.video_x[k] = torch.from_numpy(video_feature_matrix(vb, stats))
-            self.rel[k] = rel_builder(self.view(k))
         logger.info("Prepared %d graph snapshots", len(self.video_x))
+
+    def rel(self, k: int, device: torch.device | str = "cpu") -> tuple[Tensor, Tensor]:
+        """Relation edges visible in snapshot k: master edges with edge_time < boundary."""
+        device = torch.device(device)
+        if device not in self._rel_dev:                       # one copy per device
+            self._rel_dev[device] = tuple(t.to(device) for t in self.rel_master)
+        ei, et, etime = self._rel_dev[device]
+        keep = etime < int(self.boundaries[k])
+        return ei[:, keep], et[keep]
 
     def view(self, k: int) -> HKGBundle:
         """Bundle restricted to behaviour before boundaries[k]."""

@@ -397,9 +397,7 @@ class TestCausality:
                 assert _edge_pairs(g[et].edge_index) <= pairs, et
 
     def test_store_video_features_from_past_only(self, timed_bundle, loaded_data, boundaries):
-        store = SnapshotStore(timed_bundle, loaded_data, boundaries,
-                              rel_builder=lambda v: (torch.zeros(2, 0, dtype=torch.long),
-                                                     torch.zeros(0, dtype=torch.long)))
+        store = SnapshotStore(timed_bundle, loaded_data, boundaries, rel_master=None)
         vb = loaded_data.video_basic.sort_values("video_id")
         log = loaded_data.log_combined
         for k, b in enumerate(boundaries):
@@ -434,8 +432,7 @@ class TestCausality:
             snaps  = assign_snapshots(it.time, boundaries)
             store  = SnapshotStore(
                 bundle, data, boundaries,
-                rel_builder=lambda v: pipeline.build_relation_edge_index(
-                    v.structural_graph, torch.device("cpu"), 10**9))
+                rel_master=pipeline.build_relation_edge_index(bundle.structural_graph))
             batcher = PrefixBatcher(it)
             out = np.empty(len(it.time))
             model.eval()
@@ -472,6 +469,137 @@ class TestCausality:
         assert early.any() and (~early).any()
         np.testing.assert_array_equal(base[early], perturbed[early])
         assert not np.allclose(base[~early], perturbed[~early])   # the test can see changes
+
+
+# ── TestGraphConnectivity (spec 01) ────────────────────────────────────────────
+
+def _triples(ei: torch.Tensor, et: torch.Tensor) -> list[tuple[int, int, int]]:
+    return sorted(zip(ei[0].tolist(), ei[1].tolist(), et.tolist()))
+
+
+def _check_reverse_complete(ei, et, forward_ids: dict, reverse_ids: dict):
+    for fwd_et, fid in forward_ids.items():
+        if fwd_et not in reverse_ids:
+            continue
+        rid = reverse_ids[fwd_et]
+        fwd = ei[:, et == fid]
+        rev = ei[:, et == rid]
+        assert fwd.shape[1] == rev.shape[1], fwd_et
+        assert sorted(zip(fwd[1].tolist(), fwd[0].tolist())) == \
+               sorted(zip(rev[0].tolist(), rev[1].tolist())), fwd_et
+
+
+class TestGraphConnectivity:
+    """Reverse relations, author/category identity, uncapped time-masked edges."""
+
+    @pytest.fixture(scope="class")
+    def master(self, timed_bundle):
+        import main as pipeline
+        return pipeline.build_relation_edge_index(timed_bundle.structural_graph)
+
+    def test_reverse_completeness(self, master):
+        import main as pipeline
+        ei, et, _ = master
+        assert et.max().item() < pipeline.NUM_RELATIONS
+        _check_reverse_complete(ei, et, pipeline.REL_MAP, pipeline.REVERSE_REL_MAP)
+
+    def test_reverse_edges_are_causal(self, master, timed_bundle, loaded_data, boundaries):
+        import main as pipeline
+        ei, et, etime = master
+        store = SnapshotStore(timed_bundle, loaded_data, boundaries, rel_master=master)
+        for k, b in enumerate(boundaries):
+            keep = etime < b
+            kei, ket = store.rel(k)
+            assert torch.equal(kei, ei[:, keep]) and torch.equal(ket, et[keep])
+            # every kept behavioural edge, forward or reverse, is older than the cutoff
+            behavioural = etime[keep] != pipeline.STATIC_EDGE_TIME
+            assert (etime[keep][behavioural] < b).all()
+            # a reverse edge survives exactly when its forward edge does
+            _check_reverse_complete(kei, ket, pipeline.REL_MAP, pipeline.REVERSE_REL_MAP)
+
+    def test_mask_equals_per_view_build(self, master, timed_bundle, boundaries):
+        import main as pipeline
+        ei, et, etime = master
+        for b in boundaries[[0, len(boundaries) // 2, -1]]:
+            keep = etime < b
+            view = snapshot_bundle(timed_bundle, int(b))
+            vei, vet, _ = pipeline.build_relation_edge_index(view.structural_graph)
+            assert _triples(ei[:, keep], et[keep]) == _triples(vei, vet)
+
+    def test_hgt_reverse_parity(self, timed_bundle):
+        import main as pipeline
+        from gnn_encoders import SingleHGT
+        ei, et, _ = pipeline.build_full_relation_edge_index(timed_bundle)
+        assert et.max().item() < SingleHGT.NUM_EDGE_TYPES
+        forward_ids = {e: i for i, e in enumerate(SingleHGT.EDGE_TYPES)}
+        _check_reverse_complete(ei, et, forward_ids, SingleHGT.REVERSE_TYPE_IDS)
+        seq_id = forward_ids[("video", "next_in_session", "video")]
+        assert ("video", "next_in_session", "video") not in SingleHGT.REVERSE_TYPE_IDS
+        assert (et == seq_id).any()
+
+    def _encoder(self, loaded_data, bundle, num_layers):
+        import main as pipeline
+        torch.manual_seed(0)
+        model = pipeline.build_model(loaded_data, bundle, hidden_dim=16, out_dim=8,
+                                     device=torch.device("cpu"), num_layers=num_layers)
+        model.eval()
+        return model.structural_gnn
+
+    def test_users_receive_graph_signal(self, master, timed_bundle, loaded_data):
+        import main as pipeline
+        ei, et, _ = master
+        sg = timed_bundle.structural_graph
+        clicked = pipeline.REL_MAP[("user", "clicked", "video")]
+        u = int(ei[0, et == clicked][0])                     # a user with clicks
+
+        enc = self._encoder(loaded_data, timed_bundle, num_layers=2)
+        with torch.no_grad():
+            base = enc(sg, ei, et)["user"][u]
+            drop = ~(((et == clicked) & (ei[0] == u)) |
+                     ((et == clicked + len(pipeline.REL_MAP)) & (ei[1] == u)))
+            assert not torch.allclose(enc(sg, ei[:, drop], et[drop])["user"][u], base)
+
+        # L=1: a user with no incident edges equals the empty-graph output
+        enc1 = self._encoder(loaded_data, timed_bundle, num_layers=1)
+        iso = ~((ei[0] == u) | (ei[1] == u))
+        with torch.no_grad():
+            isolated = enc1(sg, ei[:, iso], et[iso])["user"][u]
+            empty    = enc1(sg, ei[:, :0], et[:0])["user"][u]
+        assert torch.allclose(isolated, empty, atol=1e-6)
+
+    def test_kg_reaches_videos_and_users(self, master, timed_bundle, loaded_data):
+        ei, et, _ = master
+        sg = timed_bundle.structural_graph
+        n_user, n_video = sg["user"].num_nodes, sg["video"].num_nodes
+        a = 0
+        a_node = n_user + n_video + a
+
+        enc = self._encoder(loaded_data, timed_bundle, num_layers=2)
+        with torch.no_grad():
+            base = enc(sg, ei, et)
+            enc.author_emb.weight[a] += 1.0
+            pert = enc(sg, ei, et)
+
+        # nodes reachable from the author in <= 2 message-passing steps
+        hop1 = set(ei[1, ei[0] == a_node].tolist())
+        hop2 = set(ei[1, torch.isin(ei[0], torch.tensor(sorted(hop1)))].tolist()) if hop1 else set()
+        reach = hop1 | hop2
+
+        a_videos = [v for v in hop1 if n_user <= v < n_user + n_video]
+        assert a_videos, "fixture author has no videos"
+        for v in a_videos:
+            assert not torch.allclose(base["video"][v - n_user], pert["video"][v - n_user])
+        a_users = [x for x in hop2 if x < n_user]
+        assert a_users, "no user clicked the author's videos"
+        for x in a_users:
+            assert not torch.allclose(base["user"][x], pert["user"][x])
+
+        for x in range(n_user):
+            if x not in reach:
+                assert torch.equal(base["user"][x], pert["user"][x])
+        for v in range(n_video):
+            if n_user + v not in reach:
+                assert torch.equal(base["video"][v], pert["video"][v])
 
 
 # ── TestStructuralGNN ──────────────────────────────────────────────────────────

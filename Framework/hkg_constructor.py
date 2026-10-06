@@ -40,6 +40,9 @@ logger = logging.getLogger(__name__)
 RANDOM_POLICY_RATE = 0.0037
 IPS_STANDARD_WEIGHT = float(1.0 - RANDOM_POLICY_RATE)
 
+# Bump whenever HKGConstructor output changes; cached bundles must match
+HKG_BUILD_VERSION = 2
+
 # Number of onehot encrypted user features
 N_ONEHOT_USER_FEATS = 18
 
@@ -71,6 +74,7 @@ class HKGBundle:
     # Snapshot views: behaviour restricted to time_ms < cutoff_ms (None = timed
     # graph over the whole log, never fed to a model directly)
     cutoff_ms:    int | None = None
+    build_version: int = HKG_BUILD_VERSION
 
     def summary(self) -> str:  # pragma: no cover
         lines = [
