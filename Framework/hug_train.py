@@ -513,6 +513,8 @@ def train(args, d: HugData, model: HUGModel, device, run_dir: Path) -> dict:
     while state["epoch"] < args.max_epochs and not stop:
         epoch = state["epoch"] + 1
         t0 = time.time()
+        if device.type == "cuda":
+            torch.cuda.reset_peak_memory_stats(device)
         model.train()
         tot, n_seen, cl_tot, aux_tot = 0.0, 0, 0.0, 0.0
         dead, kp_sum = {}, {"G": 0.0, "S": 0.0}
@@ -556,6 +558,8 @@ def train(args, d: HugData, model: HUGModel, device, run_dir: Path) -> dict:
                "train_aux": aux_tot / max(n_seen, 1),
                "val": asdict(val_m), "lr": opt.param_groups[0]["lr"],
                "seconds": round(time.time() - t0, 1)}
+        if device.type == "cuda":
+            rec["peak_gpu_gb"] = round(torch.cuda.max_memory_allocated(device) / 1e9, 2)
         if model.gcn is not None and not model.freeze_graph:
             rec["relation_weights"] = model.gcn.relation_weights().cpu().tolist()
         if hasattr(model.head, "renormalize"):
