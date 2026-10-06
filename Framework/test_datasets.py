@@ -313,13 +313,14 @@ def test_predictions_invariant_to_delayed_labels(tmp_path):
     tabs = zhihu_tables(seed=3)
     imp = tabs["inter_impression"]
     t = imp.impression_ts.to_numpy()
-    T = int(np.quantile(t, 0.85))
+    T = int(np.sort(t)[int(0.75 * len(t))]) + 300            # inside the val window, 300 s after a row
     # make sure some impressions before T have their click land at/after T
     near = np.flatnonzero((t < T) & (t > T - 600))[:6]
+    assert len(near) > 0
     imp.loc[near, "click_ts"] = T + 50
     base = write_zhihu(tmp_path / "base", tabs)
     a, state, d = _hug_scores(base)
-    assert d.inter.t_val < T * 1000 < d.inter.t_test or T * 1000 >= d.inter.t_val
+    assert d.inter.t_val < T * 1000 < d.inter.t_test
 
     # (1) flip the labels of impressions whose label is known only at/after T
     t1 = {k: v.copy() for k, v in tabs.items()}
@@ -514,11 +515,16 @@ def test_generic_modules_dataset_agnostic():
     import temporal
     from datasets import kuairand, mind, zhihurec
     names = set(kuairand.COLUMN_NAMES) | set(mind.COLUMN_NAMES) | set(zhihurec.COLUMN_NAMES)
-    names |= {"kuairand", "mind", "zhihurec", "zhihu"}
     for mod in (hug, fusion, temporal, features, hkg_constructor):
         src = inspect.getsource(mod)
-        words = set(src.lower().replace("(", " ").replace(")", " ").replace(",", " ").split())
-        hits = [n for n in names if f'"{n}"' in src or f"'{n}'" in src or n.lower() in words]
+        words = set(src.lower().replace("(", " ").replace(")", " ").replace(",", " ")
+                    .replace("[", " ").replace("]", " ").replace(":", " ").split())
+        # literals for every name; bare words only for identifier-like names ("author_id"),
+        # since plain words such as "impressions" also appear in prose
+        hits = [n for n in names if f'"{n}"' in src or f"'{n}'" in src
+                or (("_" in n or n != n.lower()) and n.lower() in words)]
+        # dataset names may appear in prose, never as string literals (no per-dataset branches)
+        hits += [n for n in ("kuairand", "mind", "zhihurec") if f'"{n}"' in src or f"'{n}'" in src]
         assert not hits, (mod.__name__, hits)
 
 

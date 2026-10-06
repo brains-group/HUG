@@ -16,8 +16,6 @@ import tempfile
 import time
 from pathlib import Path
 
-from datasets.base import DatasetBundle, GraphSpec
-
 logger = logging.getLogger(__name__)
 
 DATASETS = ("kuairand", "mind", "zhihurec")
@@ -49,7 +47,7 @@ def cache_path(args) -> Path | None:
     return root / "datasets" / f"{args.dataset}_{h}.pkl"
 
 
-def load_dataset(args, **kw) -> DatasetBundle:
+def load_dataset(args, **kw) -> "DatasetBundle":
     name = getattr(args, "dataset", "kuairand")
     if name == "kuairand":
         from datasets import kuairand
@@ -76,6 +74,14 @@ def load_dataset(args, **kw) -> DatasetBundle:
             raise
         logger.info("%s bundle cached → %s (%.0f MB)", name, path, path.stat().st_size / 1e6)
     return ds
+
+
+def __getattr__(name):
+    # lazy, so features.py can import datasets.kuairand_columns without a cycle
+    if name in ("DatasetBundle", "GraphSpec"):
+        from datasets import base
+        return getattr(base, name)
+    raise AttributeError(name)
 
 
 __all__ = ["DATASETS", "DatasetBundle", "GraphSpec", "load_dataset"]

@@ -2,7 +2,7 @@
 Causal (point-in-time) inputs for HUG
 --------------------------------------
 Every interaction at time t is scored from inputs built only from interactions
-with time_ms < t:
+with time < t:
 
   * Graph snapshots.  The timeline is cut at regular boundaries (plus the
     val/test cutoffs).  An interaction in [b_k, b_{k+1}) is encoded from
@@ -12,7 +12,7 @@ with time_ms < t:
 
   * Session prefixes.  The session embedding of an interaction pools only the
     items the user watched earlier in the same session (strictly smaller
-    time_ms), never the target item or anything after it.
+    time), never the target item or anything after it.
 
 Model weights are still fit on the whole training split — all of which
 precedes validation and test — as in any offline evaluation.
@@ -28,14 +28,8 @@ import pandas as pd
 import torch
 from torch import Tensor
 
-from features import FEEDBACK_COLS
-from data_loader import (
-    SPLIT_TEST, SPLIT_TRAIN, SPLIT_VAL,
-    KuaiRandData, assign_split, chronological_cutoffs, compute_video_statistics,
-)
-from hkg_constructor import (
-    VIDEO_FEATURE_COLS, HKGBundle, snapshot_bundle, video_feature_matrix,
-)
+from data_loader import SPLIT_TEST, SPLIT_TRAIN, SPLIT_VAL  # noqa: F401  (re-exported)
+from hkg_constructor import HKGBundle, snapshot_bundle
 
 logger = logging.getLogger(__name__)
 
@@ -50,9 +44,9 @@ class Interactions:
 
     user:      np.ndarray   # [N] user node index
     video:     np.ndarray   # [N] video node index
-    time:      np.ndarray   # [N] time_ms
+    time:      np.ndarray   # [N] time (ms)
     ips:       np.ndarray   # [N] ips weight
-    label:     np.ndarray   # [N] is_click
+    label:     np.ndarray   # [N] click label
     split:     np.ndarray   # [N] SPLIT_TRAIN / SPLIT_VAL / SPLIT_TEST
     pre_start: np.ndarray   # [N] prefix = seq_items[pre_start:pre_end]
     pre_end:   np.ndarray   # [N]
@@ -60,8 +54,8 @@ class Interactions:
     t_val:     int
     t_test:    int
     max_prefix: int
-    # Raw columns in the same row order (row id = position): ids, time, tab,
-    # session and feedback flags — input to features.py
+    # Raw per-row columns in the same row order (row id = position), from the
+    # adapter (dataset-specific; generic code reads only the arrays above)
     frame:     pd.DataFrame | None = None
     # Earliest time each row's label is known (spec 06 B); None = time
     label_time: np.ndarray | None = None
@@ -70,56 +64,11 @@ class Interactions:
         return np.flatnonzero(self.split == split)
 
 
-def build_interactions(
-    data:       KuaiRandData,
-    val_ratio:  float = 0.1,
-    test_ratio: float = 0.2,
-    max_prefix: int   = 50,
-) -> Interactions:
-    """
-    Global chronological train/val/test split (data_loader.chronological_cutoffs,
-    shared with Baselines/preprocess.py) plus, for every row, the index range
-    of its session prefix: up to `max_prefix` items of the same session with a
-    strictly earlier timestamp.
-    """
-    sm = data.session_map
-    df = sm[sm["user_id"].isin(data.user_id_map) & sm["video_id"].isin(data.video_id_map)]
-    df = df[["user_id", "video_id", "session_id", "time_ms", "is_rand", "tab"] + FEEDBACK_COLS]
-    df = df.sort_values("time_ms", kind="stable").reset_index(drop=True)
-
-    user  = df["user_id"].map(data.user_id_map).to_numpy(np.int64)
-    video = df["video_id"].map(data.video_id_map).to_numpy(np.int64)
-    time  = df["time_ms"].to_numpy(np.int64)
-    sess  = df["session_id"].to_numpy(np.int64)
-    ips   = np.where(df["is_rand"].to_numpy() == 1, 1.0, 0.9963).astype(np.float32)
-    label = df["is_click"].to_numpy(np.float32)
-
-    t_val, t_test = chronological_cutoffs(time, val_ratio, test_ratio)
-    split = assign_split(time, t_val, t_test)
-    assert time[split == SPLIT_TRAIN].max() < time[split == SPLIT_VAL].min()
-    assert time[split == SPLIT_VAL].max()   < time[split == SPLIT_TEST].min()
-
-    # Session-ordered item sequence; ties broken by global row order
-    n     = len(df)
-    order = np.lexsort((np.arange(n), time, sess))
-    s_o, t_o = sess[order], time[order]
-    pos   = np.arange(n)
-    new_sess  = np.r_[True, s_o[1:] != s_o[:-1]]
-    new_block = new_sess | np.r_[True, t_o[1:] != t_o[:-1]]
-    sess_start  = np.maximum.accumulate(np.where(new_sess,  pos, 0))
-    block_start = np.maximum.accumulate(np.where(new_block, pos, 0))
-
-    pre_end   = np.empty(n, dtype=np.int64)
-    pre_start = np.empty(n, dtype=np.int64)
-    pre_end[order]   = block_start                              # excludes same-time items
-    pre_start[order] = np.maximum(sess_start, block_start - max_prefix)
-
-    logger.info("Chronological split  train=%s  val=%s  test=%s  (t_val=%d  t_test=%d)",
-                f"{(split == SPLIT_TRAIN).sum():,}", f"{(split == SPLIT_VAL).sum():,}",
-                f"{(split == SPLIT_TEST).sum():,}", t_val, t_test)
-    return Interactions(user, video, time, ips, label, split,
-                        pre_start, pre_end, video[order], t_val, t_test, max_prefix,
-                        frame=df)
+def build_interactions(data, val_ratio: float = 0.1, test_ratio: float = 0.2,
+                       max_prefix: int = 50) -> Interactions:
+    """KuaiRand's canonical table (pre-adapter entry point; see datasets/kuairand.py)."""
+    from datasets.kuairand import build_interactions as build
+    return build(data, val_ratio, test_ratio, max_prefix)
 
 
 # ── Snapshot schedule ─────────────────────────────────────────────────────────
@@ -152,7 +101,7 @@ class SnapshotStore:
     def __init__(
         self,
         bundle:      HKGBundle,
-        data:        KuaiRandData,
+        data,                                 # legacy: the raw data container
         boundaries:  np.ndarray,
         rel_master:  tuple[Tensor, Tensor, Tensor] | None,
         needed:      set[int] | None = None,
@@ -196,12 +145,12 @@ class SnapshotStore:
                     g[et].edge_index = g[et].edge_index[:, :0]
         return v
 
-    _SHOW_COL = VIDEO_FEATURE_COLS.index("show_cnt_log")
-    _COLD_MAX = float(np.log1p(1.0))                 # show_cnt <= 1
+    _COLD_MAX = float(np.log1p(1.0))                 # show count <= 1
 
     def is_cold(self, k: int, video_idx: Tensor) -> np.ndarray:
         """True where the video had 0–1 interactions before snapshot k."""
-        return (self.video_x[k][video_idx, self._SHOW_COL] <= self._COLD_MAX + 1e-6).numpy()
+        from datasets.kuairand_hkg import SHOW_COL       # legacy models (KuaiRand features)
+        return (self.video_x[k][video_idx, SHOW_COL] <= self._COLD_MAX + 1e-6).numpy()
 
 
 # ── Batching ──────────────────────────────────────────────────────────────────

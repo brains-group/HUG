@@ -19,17 +19,24 @@ import pandas as pd
 from data_loader import KuaiRandData, KuaiRandLoader, compute_video_statistics
 from datasets.base import BaselineTables, DatasetBundle, GraphSpec, data_fingerprint
 from features import (
-    HUG_VIDEO_CAT_COLS, VIDEO_STAT_COLS, asof_video_statistics, hour_of_day,
+    HUG_VIDEO_CAT_COLS, USER_CAT_COLS, VIDEO_CAT_COLS, VIDEO_STAT_COLS, asof_video_statistics, hour_of_day,
     user_categoricals, video_categoricals,
 )
-from hkg_constructor import HKGBundle, HKGConstructor, video_feature_matrix
-from temporal import build_interactions
+from datasets.kuairand_hkg import HKGConstructor, video_feature_matrix
+from hkg_constructor import HKGBundle
+from data_loader import SPLIT_TEST, SPLIT_TRAIN, SPLIT_VAL, assign_split, chronological_cutoffs
+from features import FEEDBACK_COLS
+from temporal import Interactions
 
 logger = logging.getLogger(__name__)
 
 NAME = "kuairand"
 TZ_OFFSET_HOURS = 8                                  # Asia/Shanghai
 METADATA_EVIDENCE_TYPES = ["author"]
+# Raw column names that must never appear in the generic modules (spec 06 A10)
+COLUMN_NAMES = sorted(
+    set(KuaiRandLoader.LOG_USECOLS) | set(USER_CAT_COLS) | set(VIDEO_CAT_COLS) | set(VIDEO_STAT_COLS)
+    | set(FEEDBACK_COLS) | {"session_id", "tag_list", "play_ratio", "duration_s", "aspect_ratio"})
 
 
 def hug_relations():
@@ -46,6 +53,58 @@ def hug_relations():
     for et, rid in REVERSE_REL_MAP.items():
         types[rid], names[rid] = (et[2], et[0]), f"rev_{et[1]}"
     return forward, REVERSE_REL_MAP, types, names
+
+
+def build_interactions(
+    data:       KuaiRandData,
+    val_ratio:  float = 0.1,
+    test_ratio: float = 0.2,
+    max_prefix: int   = 50,
+) -> Interactions:
+    """
+    Global chronological train/val/test split (data_loader.chronological_cutoffs,
+    shared with Baselines/preprocess.py) plus, for every row, the index range
+    of its session prefix: up to `max_prefix` items of the same session with a
+    strictly earlier timestamp.
+    """
+    sm = data.session_map
+    df = sm[sm["user_id"].isin(data.user_id_map) & sm["video_id"].isin(data.video_id_map)]
+    df = df[["user_id", "video_id", "session_id", "time_ms", "is_rand", "tab"] + FEEDBACK_COLS]
+    df = df.sort_values("time_ms", kind="stable").reset_index(drop=True)
+
+    user  = df["user_id"].map(data.user_id_map).to_numpy(np.int64)
+    video = df["video_id"].map(data.video_id_map).to_numpy(np.int64)
+    time  = df["time_ms"].to_numpy(np.int64)
+    sess  = df["session_id"].to_numpy(np.int64)
+    ips   = np.where(df["is_rand"].to_numpy() == 1, 1.0, 0.9963).astype(np.float32)
+    label = df["is_click"].to_numpy(np.float32)
+
+    t_val, t_test = chronological_cutoffs(time, val_ratio, test_ratio)
+    split = assign_split(time, t_val, t_test)
+    assert time[split == SPLIT_TRAIN].max() < time[split == SPLIT_VAL].min()
+    assert time[split == SPLIT_VAL].max()   < time[split == SPLIT_TEST].min()
+
+    # Session-ordered item sequence; ties broken by global row order
+    n     = len(df)
+    order = np.lexsort((np.arange(n), time, sess))
+    s_o, t_o = sess[order], time[order]
+    pos   = np.arange(n)
+    new_sess  = np.r_[True, s_o[1:] != s_o[:-1]]
+    new_block = new_sess | np.r_[True, t_o[1:] != t_o[:-1]]
+    sess_start  = np.maximum.accumulate(np.where(new_sess,  pos, 0))
+    block_start = np.maximum.accumulate(np.where(new_block, pos, 0))
+
+    pre_end   = np.empty(n, dtype=np.int64)
+    pre_start = np.empty(n, dtype=np.int64)
+    pre_end[order]   = block_start                              # excludes same-time items
+    pre_start[order] = np.maximum(sess_start, block_start - max_prefix)
+
+    logger.info("Chronological split  train=%s  val=%s  test=%s  (t_val=%d  t_test=%d)",
+                f"{(split == SPLIT_TRAIN).sum():,}", f"{(split == SPLIT_VAL).sum():,}",
+                f"{(split == SPLIT_TEST).sum():,}", t_val, t_test)
+    return Interactions(user, video, time, ips, label, split,
+                        pre_start, pre_end, video[order], t_val, t_test, max_prefix,
+                        frame=df)
 
 
 class KuaiRandItemFeatures:

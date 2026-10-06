@@ -41,6 +41,9 @@ SPLIT_RULE = "day_snap"
 ENTITY_MIN_CONFIDENCE = 0.5
 METADATA_EVIDENCE_TYPES = ["subcategory", "entity"]
 ADAPTER_VERSION = 1
+# Raw column names that must never appear in the generic modules (spec 06 A10)
+COLUMN_NAMES = ["news_id", "subcategory", "title_entities", "abstract_entities", "impression_id",
+                "impressions", "WikidataId", "Confidence"]
 
 BEHAVIOR_COLS = ["impression_id", "user", "time", "history", "impressions"]
 NEWS_COLS = ["news_id", "category", "subcategory", "title", "abstract", "url",

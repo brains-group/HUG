@@ -43,6 +43,11 @@ TZ_OFFSET_HOURS = 8
 SPLIT_RULE = "day_snap"
 METADATA_EVIDENCE_TYPES = ["author", "question"]
 ADAPTER_VERSION = 1
+# Raw column names that must never appear in the generic modules (spec 06 A10)
+COLUMN_NAMES = ["answer_id", "question_id", "impression_ts", "click_ts", "register_ts", "create_ts",
+                "anonymous", "high_value", "editor_rec", "has_pic", "has_video", "excellent_author",
+                "excellent_answerer", "topics_followed", "device_model", "device_brand", "login_freq",
+                "register_type", "register_platform"]
 
 IMPRESSION_COLS = ["user_id", "answer_id", "impression_ts", "click_ts"]
 ANSWER_COLS = ["answer_id", "question_id", "anonymous", "author_id", "high_value", "editor_rec",
