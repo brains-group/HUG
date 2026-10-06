@@ -484,8 +484,8 @@ class TestStructuralGNN:
             user_cont_dim      = 8,
             user_onehot_vocab  = [5] * 18,
             video_feat_dim     = 13,
-            author_feat_dim    = 1,
-            category_feat_dim  = 1,
+            n_authors          = N_AUTHORS,
+            n_categories       = N_CATS,
             hidden_dim         = 32,
             out_dim            = 16,
             num_relations      = 7,
@@ -713,7 +713,7 @@ class TestKuaiCVRModel:
     def model(self):
         struct = StructuralGNN(
             user_cont_dim=8, user_onehot_vocab=[5]*18,
-            video_feat_dim=13, author_feat_dim=1, category_feat_dim=1,
+            video_feat_dim=13, n_authors=N_AUTHORS, n_categories=N_CATS,
             hidden_dim=32, out_dim=self.D, num_relations=7, num_layers=1,
         )
         seq = SequentialGNN(
@@ -816,8 +816,8 @@ class TestPipelineIntegration:
             ].shape[1],
             user_onehot_vocab  = [5] * 18,
             video_feat_dim     = hkg_bundle.structural_graph["video"].x.shape[1],
-            author_feat_dim    = 1,
-            category_feat_dim  = 1,
+            n_authors          = hkg_bundle.n_authors,
+            n_categories       = hkg_bundle.n_categories,
             hidden_dim=32, out_dim=D, num_relations=7, num_layers=1,
         )
         seq = SequentialGNN(
@@ -1089,8 +1089,8 @@ class TestRealData:
             user_cont_dim     = user_cont_dim,
             user_onehot_vocab = onehot_vocabs,
             video_feat_dim    = video_feat_dim,
-            author_feat_dim   = 1,
-            category_feat_dim = 1,
+            n_authors         = real_bundle.n_authors,
+            n_categories      = real_bundle.n_categories,
             hidden_dim        = 64,
             out_dim           = D,
             num_relations     = 7,

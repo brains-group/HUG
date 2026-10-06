@@ -29,6 +29,13 @@ from torch_geometric.nn import GATConv, RGCNConv, GatedGraphConv
 from torch_geometric.utils import softmax as pyg_softmax
 
 
+def _id_embedding(n: int, dim: int) -> nn.Embedding:
+    """ID embedding on the scale of the projected user/video inputs."""
+    emb = nn.Embedding(n, dim)
+    nn.init.normal_(emb.weight, std=dim ** -0.5)
+    return emb
+
+
 # ── Structural GNN (R-GCN with optional GAT refinement) ───────────────────────
 
 class StructuralGNN(nn.Module):
@@ -47,10 +54,11 @@ class StructuralGNN(nn.Module):
         One embedding table is created per feature.
     video_feat_dim : int
         Dimension of video feature vector from HKG (graph["video"].x).
-    author_feat_dim : int
-        Dimension of author node features (typically 1 — learned embedding).
-    category_feat_dim : int
-        Dimension of category node features (typically 1 — learned embedding).
+    n_authors : int
+        Number of author nodes.  Authors have no raw features; each gets an
+        ID embedding (fixed random identity while the encoder is frozen).
+    n_categories : int
+        Number of category nodes, embedded the same way.
     hidden_dim : int
         Width of all hidden layers.
     out_dim : int
@@ -68,8 +76,8 @@ class StructuralGNN(nn.Module):
         user_cont_dim:      int,
         user_onehot_vocab:  list[int],
         video_feat_dim:     int,
-        author_feat_dim:    int,
-        category_feat_dim:  int,
+        n_authors:          int,
+        n_categories:       int,
         hidden_dim:         int = 128,
         out_dim:            int = 64,
         num_relations:      int = 7,
@@ -92,8 +100,8 @@ class StructuralGNN(nn.Module):
 
         # ── Video / Author / Category input projections ────────────────────────
         self.video_proj    = nn.Linear(video_feat_dim,    hidden_dim)
-        self.author_proj   = nn.Linear(max(author_feat_dim, 1),   hidden_dim)
-        self.category_proj = nn.Linear(max(category_feat_dim, 1), hidden_dim)
+        self.author_emb    = _id_embedding(n_authors,    hidden_dim)
+        self.category_emb  = _id_embedding(n_categories, hidden_dim)
 
         # ── R-GCN layers ───────────────────────────────────────────────────────
         # PyG RGCNConv operates on a homogeneous edge_index with a relation
@@ -146,8 +154,8 @@ class StructuralGNN(nn.Module):
             graph["user"].x.to(dev), graph["user"].onehot.to(dev)
         )
         h_video    = F.relu(self.video_proj(graph["video"].x.to(dev)))
-        h_author   = F.relu(self.author_proj(graph["author"].x.to(dev)))
-        h_category = F.relu(self.category_proj(graph["category"].x.to(dev)))
+        h_author   = self.author_emb.weight
+        h_category = self.category_emb.weight
 
         # Concatenate all node embeddings into one big tensor
         # Order: [user | video | author | category]
@@ -397,8 +405,8 @@ class SingleHGT(nn.Module):
     user_cont_dim : int
     user_onehot_vocab : list[int]
     video_feat_dim : int
-    author_feat_dim : int
-    category_feat_dim : int
+    n_authors : int
+    n_categories : int
     hidden_dim : int
     out_dim : int
     num_heads : int
@@ -431,8 +439,8 @@ class SingleHGT(nn.Module):
         user_cont_dim:     int,
         user_onehot_vocab: list[int],
         video_feat_dim:    int,
-        author_feat_dim:   int,
-        category_feat_dim: int,
+        n_authors:         int,
+        n_categories:      int,
         hidden_dim:        int   = 128,
         out_dim:           int   = 64,
         num_heads:         int   = 4,
@@ -455,8 +463,8 @@ class SingleHGT(nn.Module):
         user_input_dim = user_cont_dim + 8 * len(user_onehot_vocab)
         self.user_proj     = nn.Linear(user_input_dim,            hidden_dim)
         self.video_proj    = nn.Linear(video_feat_dim,            hidden_dim)
-        self.author_proj   = nn.Linear(max(author_feat_dim, 1),   hidden_dim)
-        self.category_proj = nn.Linear(max(category_feat_dim, 1), hidden_dim)
+        self.author_emb    = _id_embedding(n_authors,    hidden_dim)
+        self.category_emb  = _id_embedding(n_categories, hidden_dim)
 
         # ── HGT layers ────────────────────────────────────────────────────────
         # Each layer has per-edge-type and per-node-type projection matrices.
@@ -526,8 +534,8 @@ class SingleHGT(nn.Module):
         h_user     = self._encode_user(
             full_graph["user"].x.to(dev), full_graph["user"].onehot.to(dev))
         h_video    = F.relu(self.video_proj(full_graph["video"].x.to(dev)))
-        h_author   = F.relu(self.author_proj(full_graph["author"].x.to(dev)))
-        h_category = F.relu(self.category_proj(full_graph["category"].x.to(dev)))
+        h_author   = self.author_emb.weight
+        h_category = self.category_emb.weight
 
         n_user   = h_user.shape[0]
         n_video  = h_video.shape[0]
