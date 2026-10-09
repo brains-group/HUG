@@ -1,0 +1,587 @@
+% ---------------------------------------------------------------------------
+% Bibliography for the WWW'27 draft.
+% Every entry was checked on 2026-10-06 against Crossref (publisher DOI
+% metadata), PMLR, arXiv, or the ICLR/NeurIPS proceedings pages. The
+% "% verified:" line above each entry gives the source that was used.
+% dblp.org blocked automated access, so DBLP itself was not consulted.
+% ---------------------------------------------------------------------------
+
+% ---- Graph-based recommendation -------------------------------------------
+% verified: https://doi.org/10.1145/3397271.3401063
+@inproceedings{he2020lightgcn,
+  author    = {He, Xiangnan and Deng, Kuan and Wang, Xiang and Li, Yan and Zhang, Yongdong and Wang, Meng},
+  title     = {{LightGCN}: Simplifying and Powering Graph Convolution Network for Recommendation},
+  booktitle = {Proceedings of the 43rd International ACM SIGIR Conference on Research and Development in Information Retrieval},
+  year      = {2020},
+  pages     = {639--648},
+  doi       = {10.1145/3397271.3401063}
+}
+
+% verified: https://doi.org/10.1145/3477495.3531937
+@inproceedings{yu2022simgcl,
+  author    = {Yu, Junliang and Yin, Hongzhi and Xia, Xin and Chen, Tong and Cui, Lizhen and Nguyen, Quoc Viet Hung},
+  title     = {Are Graph Augmentations Necessary? Simple Graph Contrastive Learning for Recommendation},
+  booktitle = {Proceedings of the 45th International ACM SIGIR Conference on Research and Development in Information Retrieval},
+  year      = {2022},
+  pages     = {1294--1303},
+  doi       = {10.1145/3477495.3531937}
+}
+
+% verified: https://doi.org/10.1109/TKDE.2023.3288135 ; https://www.computer.org/csdl/journal/tk/2024/02/10158930/1OaaNTxZVaE
+% (early access 2023; final issue vol. 36, no. 2, 2024. Key kept as yu2023xsimgcl.)
+@article{yu2023xsimgcl,
+  author  = {Yu, Junliang and Xia, Xin and Chen, Tong and Cui, Lizhen and Hung, Nguyen Quoc Viet and Yin, Hongzhi},
+  title   = {{XSimGCL}: Towards Extremely Simple Graph Contrastive Learning for Recommendation},
+  journal = {IEEE Transactions on Knowledge and Data Engineering},
+  volume  = {36},
+  number  = {2},
+  pages   = {913--926},
+  year    = {2024},
+  doi     = {10.1109/TKDE.2023.3288135}
+}
+
+% verified: https://doi.org/10.1007/978-3-319-93417-4_38
+@inproceedings{schlichtkrull2018rgcn,
+  author    = {Schlichtkrull, Michael and Kipf, Thomas N. and Bloem, Peter and van den Berg, Rianne and Titov, Ivan and Welling, Max},
+  title     = {Modeling Relational Data with Graph Convolutional Networks},
+  booktitle = {The Semantic Web -- ESWC 2018},
+  series    = {Lecture Notes in Computer Science},
+  volume    = {10843},
+  year      = {2018},
+  pages     = {593--607},
+  doi       = {10.1007/978-3-319-93417-4_38}
+}
+
+% verified: https://doi.org/10.1145/3292500.3330989
+@inproceedings{wang2019kgat,
+  author    = {Wang, Xiang and He, Xiangnan and Cao, Yixin and Liu, Meng and Chua, Tat-Seng},
+  title     = {{KGAT}: Knowledge Graph Attention Network for Recommendation},
+  booktitle = {Proceedings of the 25th ACM SIGKDD International Conference on Knowledge Discovery \& Data Mining},
+  year      = {2019},
+  pages     = {950--958},
+  doi       = {10.1145/3292500.3330989}
+}
+
+% verified: https://doi.org/10.1145/3366423.3380027
+@inproceedings{hu2020hgt,
+  author    = {Hu, Ziniu and Dong, Yuxiao and Wang, Kuansan and Sun, Yizhou},
+  title     = {Heterogeneous Graph Transformer},
+  booktitle = {Proceedings of The Web Conference 2020},
+  year      = {2020},
+  pages     = {2704--2710},
+  doi       = {10.1145/3366423.3380027}
+}
+
+% verified: https://doi.org/10.1145/3447548.3467350
+@inproceedings{lv2021simplehgn,
+  author    = {Lv, Qingsong and Ding, Ming and Liu, Qiang and Chen, Yuxiang and Feng, Wenzheng and He, Siming and Zhou, Chang and Jiang, Jianguo and Dong, Yuxiao and Tang, Jie},
+  title     = {Are We Really Making Much Progress? Revisiting, Benchmarking and Refining Heterogeneous Graph Neural Networks},
+  booktitle = {Proceedings of the 27th ACM SIGKDD Conference on Knowledge Discovery \& Data Mining},
+  year      = {2021},
+  pages     = {1150--1160},
+  doi       = {10.1145/3447548.3467350}
+}
+
+% verified: https://proceedings.mlr.press/v97/wu19e.html
+@inproceedings{wu2019sgc,
+  author    = {Wu, Felix and Souza, Amauri and Zhang, Tianyi and Fifty, Christopher and Yu, Tao and Weinberger, Kilian},
+  title     = {Simplifying Graph Convolutional Networks},
+  booktitle = {Proceedings of the 36th International Conference on Machine Learning},
+  series    = {Proceedings of Machine Learning Research},
+  volume    = {97},
+  year      = {2019},
+  pages     = {6861--6871}
+}
+
+% verified: https://arxiv.org/abs/2004.11198
+@article{frasca2020sign,
+  author  = {Frasca, Fabrizio and Rossi, Emanuele and Eynard, Davide and Chamberlain, Ben and Bronstein, Michael and Monti, Federico},
+  title   = {{SIGN}: Scalable Inception Graph Neural Networks},
+  journal = {arXiv preprint arXiv:2004.11198},
+  year    = {2020}
+}
+
+% ---- Sequential / CTR models ----------------------------------------------
+% verified: https://arxiv.org/abs/1511.05493 (ICLR 2016 conference paper)
+@inproceedings{li2016ggnn,
+  author    = {Li, Yujia and Tarlow, Daniel and Brockschmidt, Marc and Zemel, Richard},
+  title     = {Gated Graph Sequence Neural Networks},
+  booktitle = {International Conference on Learning Representations},
+  year      = {2016}
+}
+
+% verified: https://doi.org/10.1609/aaai.v33i01.3301346
+@inproceedings{wu2019srgnn,
+  author    = {Wu, Shu and Tang, Yuyuan and Zhu, Yanqiao and Wang, Liang and Xie, Xing and Tan, Tieniu},
+  title     = {Session-Based Recommendation with Graph Neural Networks},
+  booktitle = {Proceedings of the AAAI Conference on Artificial Intelligence},
+  volume    = {33},
+  year      = {2019},
+  pages     = {346--353},
+  doi       = {10.1609/aaai.v33i01.3301346}
+}
+
+% verified: https://doi.org/10.1109/ICDM.2018.00035
+@inproceedings{kang2018sasrec,
+  author    = {Kang, Wang-Cheng and McAuley, Julian},
+  title     = {Self-Attentive Sequential Recommendation},
+  booktitle = {2018 IEEE International Conference on Data Mining (ICDM)},
+  year      = {2018},
+  pages     = {197--206},
+  doi       = {10.1109/ICDM.2018.00035}
+}
+
+% verified: https://doi.org/10.1145/3219819.3219823
+@inproceedings{zhou2018din,
+  author    = {Zhou, Guorui and Zhu, Xiaoqiang and Song, Chenru and Fan, Ying and Zhu, Han and Ma, Xiao and Yan, Yanghui and Jin, Junqi and Li, Han and Gai, Kun},
+  title     = {Deep Interest Network for Click-Through Rate Prediction},
+  booktitle = {Proceedings of the 24th ACM SIGKDD International Conference on Knowledge Discovery \& Data Mining},
+  year      = {2018},
+  pages     = {1059--1068},
+  doi       = {10.1145/3219819.3219823}
+}
+
+% verified: https://doi.org/10.1145/3326937.3341261
+@inproceedings{chen2019bst,
+  author    = {Chen, Qiwei and Zhao, Huan and Li, Wei and Huang, Pipei and Ou, Wenwu},
+  title     = {Behavior Sequence Transformer for E-commerce Recommendation in {Alibaba}},
+  booktitle = {Proceedings of the 1st International Workshop on Deep Learning Practice for High-Dimensional Sparse Data},
+  year      = {2019},
+  pages     = {1--4},
+  doi       = {10.1145/3326937.3341261}
+}
+
+% verified: https://doi.org/10.1145/3580305.3599918
+@inproceedings{xia2023transact,
+  author    = {Xia, Xue and Eksombatchai, Pong and Pancha, Nikil and Badani, Dhruvil Deven and Wang, Po-Wei and Gu, Neng and Joshi, Saurabh Vishwas and Farahpour, Nazanin and Zhang, Zhiyuan and Zhai, Andrew},
+  title     = {{TransAct}: Transformer-based Realtime User Action Model for Recommendation at {Pinterest}},
+  booktitle = {Proceedings of the 29th ACM SIGKDD Conference on Knowledge Discovery and Data Mining},
+  year      = {2023},
+  pages     = {5249--5259},
+  doi       = {10.1145/3580305.3599918}
+}
+
+% verified: https://proceedings.mlr.press/v235/ (PMLR 235:59421-59434)
+@inproceedings{zhang2024wukong,
+  author    = {Zhang, Buyun and Luo, Liang and Chen, Yuxin and Nie, Jade and Liu, Xi and Li, Shen and Zhao, Yanli and Hao, Yuchen and Yao, Yantao and Wen, Ellie Dingqiao and Park, Jongsoo and Naumov, Maxim and Chen, Wenlin},
+  title     = {Wukong: Towards a Scaling Law for Large-Scale Recommendation},
+  booktitle = {Proceedings of the 41st International Conference on Machine Learning},
+  series    = {Proceedings of Machine Learning Research},
+  volume    = {235},
+  year      = {2024},
+  pages     = {59421--59434}
+}
+
+% verified: https://proceedings.mlr.press/v235/ (PMLR 235:58484-58509)
+@inproceedings{zhai2024hstu,
+  author    = {Zhai, Jiaqi and Liao, Lucy and Liu, Xing and Wang, Yueming and Li, Rui and Cao, Xuan and Gao, Leon and Gong, Zhaojie and Gu, Fangda and He, Jiayuan and Lu, Yinghai and Shi, Yu},
+  title     = {Actions Speak Louder than Words: Trillion-Parameter Sequential Transducers for Generative Recommendations},
+  booktitle = {Proceedings of the 41st International Conference on Machine Learning},
+  series    = {Proceedings of Machine Learning Research},
+  volume    = {235},
+  year      = {2024},
+  pages     = {58484--58509}
+}
+
+% verified: https://doi.org/10.1145/3357384.3357951
+@inproceedings{li2019fignn,
+  author    = {Li, Zekun and Cui, Zeyu and Wu, Shu and Zhang, Xiaoyu and Wang, Liang},
+  title     = {{Fi-GNN}: Modeling Feature Interactions via Graph Neural Networks for {CTR} Prediction},
+  booktitle = {Proceedings of the 28th ACM International Conference on Information and Knowledge Management},
+  year      = {2019},
+  pages     = {539--548},
+  doi       = {10.1145/3357384.3357951}
+}
+
+% verified: https://doi.org/10.1145/3442381.3450078
+@inproceedings{wang2021dcnv2,
+  author    = {Wang, Ruoxi and Shivanna, Rakesh and Cheng, Derek and Jain, Sagar and Lin, Dong and Hong, Lichan and Chi, Ed},
+  title     = {{DCN V2}: Improved Deep \& Cross Network and Practical Lessons for Web-scale Learning to Rank Systems},
+  booktitle = {Proceedings of the Web Conference 2021},
+  year      = {2021},
+  pages     = {1785--1797},
+  doi       = {10.1145/3442381.3450078}
+}
+
+% verified: https://doi.org/10.1145/3219819.3220007
+@inproceedings{ma2018mmoe,
+  author    = {Ma, Jiaqi and Zhao, Zhe and Yi, Xinyang and Chen, Jilin and Hong, Lichan and Chi, Ed H.},
+  title     = {Modeling Task Relationships in Multi-task Learning with Multi-gate Mixture-of-Experts},
+  booktitle = {Proceedings of the 24th ACM SIGKDD International Conference on Knowledge Discovery \& Data Mining},
+  year      = {2018},
+  pages     = {1930--1939},
+  doi       = {10.1145/3219819.3220007}
+}
+
+% ---- Graph + sequence hybrids ---------------------------------------------
+% verified: https://doi.org/10.1145/3404835.3462968
+@inproceedings{chang2021surge,
+  author    = {Chang, Jianxin and Gao, Chen and Zheng, Yu and Hui, Yiqun and Niu, Yanan and Song, Yang and Jin, Depeng and Li, Yong},
+  title     = {Sequential Recommendation with Graph Neural Networks},
+  booktitle = {Proceedings of the 44th International ACM SIGIR Conference on Research and Development in Information Retrieval},
+  year      = {2021},
+  pages     = {378--387},
+  doi       = {10.1145/3404835.3462968}
+}
+
+% verified: https://doi.org/10.1145/3397271.3401142
+@inproceedings{wang2020gcegnn,
+  author    = {Wang, Ziyang and Wei, Wei and Cong, Gao and Li, Xiao-Li and Mao, Xian-Ling and Qiu, Minghui},
+  title     = {Global Context Enhanced Graph Neural Networks for Session-based Recommendation},
+  booktitle = {Proceedings of the 43rd International ACM SIGIR Conference on Research and Development in Information Retrieval},
+  year      = {2020},
+  pages     = {169--178},
+  doi       = {10.1145/3397271.3401142}
+}
+
+% verified: https://doi.org/10.24963/ijcai.2022/333
+@inproceedings{zhang2022gcl4sr,
+  author    = {Zhang, Yixin and Liu, Yong and Xu, Yonghui and Xiong, Hao and Lei, Chenyi and He, Wei and Cui, Lizhen and Miao, Chunyan},
+  title     = {Enhancing Sequential Recommendation with Graph Contrastive Learning},
+  booktitle = {Proceedings of the Thirty-First International Joint Conference on Artificial Intelligence},
+  year      = {2022},
+  pages     = {2398--2405},
+  doi       = {10.24963/ijcai.2022/333}
+}
+
+% verified: https://doi.org/10.1145/3511808.3557404
+@inproceedings{wang2022mclsr,
+  author    = {Wang, Ziyang and Liu, Huoyu and Wei, Wei and Hu, Yue and Mao, Xian-Ling and He, Shaojian and Fang, Rui and Chen, Dangyang},
+  title     = {Multi-level Contrastive Learning Framework for Sequential Recommendation},
+  booktitle = {Proceedings of the 31st ACM International Conference on Information \& Knowledge Management},
+  year      = {2022},
+  pages     = {2098--2107},
+  doi       = {10.1145/3511808.3557404}
+}
+
+% ---- Multi-view representation, bottlenecks, sparsity ---------------------
+% verified: https://doi.org/10.1145/3394171.3413678
+@inproceedings{hazarika2020misa,
+  author    = {Hazarika, Devamanyu and Zimmermann, Roger and Poria, Soujanya},
+  title     = {{MISA}: Modality-Invariant and -Specific Representations for Multimodal Sentiment Analysis},
+  booktitle = {Proceedings of the 28th ACM International Conference on Multimedia},
+  year      = {2020},
+  pages     = {1122--1131},
+  doi       = {10.1145/3394171.3413678}
+}
+
+% verified: https://arxiv.org/abs/2002.07017 (ICLR 2020, OpenReview id B1xwcyHFDr)
+@inproceedings{federici2020mib,
+  author    = {Federici, Marco and Dutta, Anjan and Forr{\'e}, Patrick and Kushman, Nate and Akata, Zeynep},
+  title     = {Learning Robust Representations via Multi-View Information Bottleneck},
+  booktitle = {International Conference on Learning Representations},
+  year      = {2020}
+}
+
+% verified: https://arxiv.org/abs/physics/0004057
+@article{tishby2000ib,
+  author  = {Tishby, Naftali and Pereira, Fernando C. and Bialek, William},
+  title   = {The Information Bottleneck Method},
+  journal = {arXiv preprint physics/0004057},
+  year    = {2000}
+}
+
+% verified: https://arxiv.org/abs/1612.00410 (ICLR 2017)
+@inproceedings{alemi2017vib,
+  author    = {Alemi, Alexander A. and Fischer, Ian and Dillon, Joshua V. and Murphy, Kevin},
+  title     = {Deep Variational Information Bottleneck},
+  booktitle = {International Conference on Learning Representations},
+  year      = {2017}
+}
+
+% verified: https://arxiv.org/abs/1312.5663 (ICLR 2014)
+@inproceedings{makhzani2014ksparse,
+  author    = {Makhzani, Alireza and Frey, Brendan},
+  title     = {k-Sparse Autoencoders},
+  booktitle = {International Conference on Learning Representations},
+  year      = {2014}
+}
+
+% verified: https://arxiv.org/abs/2406.04093 ; https://iclr.cc/virtual/2025/poster/28040
+% (published at ICLR 2025; key kept as gao2024sae)
+@inproceedings{gao2024sae,
+  author    = {Gao, Leo and Dupr{\'e} la Tour, Tom and Tillman, Henk and Goh, Gabriel and Troll, Rajan and Radford, Alec and Sutskever, Ilya and Leike, Jan and Wu, Jeffrey},
+  title     = {Scaling and Evaluating Sparse Autoencoders},
+  booktitle = {International Conference on Learning Representations},
+  year      = {2025}
+}
+
+% verified: https://arxiv.org/abs/1712.01312 (ICLR 2018)
+@inproceedings{louizos2018l0,
+  author    = {Louizos, Christos and Welling, Max and Kingma, Diederik P.},
+  title     = {Learning Sparse Neural Networks through {$L_0$} Regularization},
+  booktitle = {International Conference on Learning Representations},
+  year      = {2018}
+}
+
+% verified: https://arxiv.org/abs/1807.03748
+@article{oord2018infonce,
+  author  = {van den Oord, Aaron and Li, Yazhe and Vinyals, Oriol},
+  title   = {Representation Learning with Contrastive Predictive Coding},
+  journal = {arXiv preprint arXiv:1807.03748},
+  year    = {2018}
+}
+
+% verified: https://doi.org/10.1007/11564089_7
+@inproceedings{gretton2005hsic,
+  author    = {Gretton, Arthur and Bousquet, Olivier and Smola, Alex and Sch{\"o}lkopf, Bernhard},
+  title     = {Measuring Statistical Dependence with {Hilbert-Schmidt} Norms},
+  booktitle = {Algorithmic Learning Theory},
+  series    = {Lecture Notes in Computer Science},
+  volume    = {3734},
+  year      = {2005},
+  pages     = {63--77},
+  doi       = {10.1007/11564089_7}
+}
+
+% verified: https://doi.org/10.52202/075280-0452
+@inproceedings{rajput2023tiger,
+  author    = {Rajput, Shashank and Mehta, Nikhil and Singh, Anima and Keshavan, Raghunandan H. and Vu, Trung and Heldt, Lukasz and Hong, Lichan and Tay, Yi and Tran, Vinh Q. and Samost, Jonah and Kula, Maciej and Chi, Ed H. and Sathiamoorthy, Maheswaran},
+  title     = {Recommender Systems with Generative Retrieval},
+  booktitle = {Advances in Neural Information Processing Systems},
+  volume    = {36},
+  year      = {2023},
+  pages     = {10299--10315}
+}
+
+% verified: https://proceedings.mlr.press/v235/ (PMLR 235:16891-16909)
+@inproceedings{guo2024collapse,
+  author    = {Guo, Xingzhuo and Pan, Junwei and Wang, Ximei and Chen, Baixu and Jiang, Jie and Long, Mingsheng},
+  title     = {On the Embedding Collapse when Scaling up Recommendation Models},
+  booktitle = {Proceedings of the 41st International Conference on Machine Learning},
+  series    = {Proceedings of Machine Learning Research},
+  volume    = {235},
+  year      = {2024},
+  pages     = {16891--16909}
+}
+
+% ---- Evaluation rigor ------------------------------------------------------
+% verified: https://doi.org/10.1145/3298689.3347058
+@inproceedings{dacrema2019progress,
+  author    = {Ferrari Dacrema, Maurizio and Cremonesi, Paolo and Jannach, Dietmar},
+  title     = {Are We Really Making Much Progress? A Worrying Analysis of Recent Neural Recommendation Approaches},
+  booktitle = {Proceedings of the 13th ACM Conference on Recommender Systems},
+  year      = {2019},
+  pages     = {101--109},
+  doi       = {10.1145/3298689.3347058}
+}
+
+% verified: https://doi.org/10.1145/3383313.3412488
+@inproceedings{rendle2020ncf,
+  author    = {Rendle, Steffen and Krichene, Walid and Zhang, Li and Anderson, John},
+  title     = {Neural Collaborative Filtering vs. Matrix Factorization Revisited},
+  booktitle = {Proceedings of the 14th ACM Conference on Recommender Systems},
+  year      = {2020},
+  pages     = {240--248},
+  doi       = {10.1145/3383313.3412488}
+}
+
+% verified: https://doi.org/10.1145/3569930
+@article{ji2023leakage,
+  author  = {Ji, Yitong and Sun, Aixin and Zhang, Jie and Li, Chenliang},
+  title   = {A Critical Study on Data Leakage in Recommender System Offline Evaluation},
+  journal = {ACM Transactions on Information Systems},
+  volume  = {41},
+  number  = {3},
+  pages   = {1--27},
+  year    = {2023},
+  doi     = {10.1145/3569930}
+}
+
+% verified: https://doi.org/10.1145/3511808.3557479
+@inproceedings{zhang2022oneepoch,
+  author    = {Zhang, Zhao-Yu and Sheng, Xiang-Rong and Zhang, Yujing and Jiang, Biye and Han, Shuguang and Deng, Hongbo and Zheng, Bo},
+  title     = {Towards Understanding the Overfitting Phenomenon of Deep Click-Through Rate Models},
+  booktitle = {Proceedings of the 31st ACM International Conference on Information \& Knowledge Management},
+  year      = {2022},
+  pages     = {2671--2680},
+  doi       = {10.1145/3511808.3557479}
+}
+
+% verified: https://doi.org/10.1145/3459637.3482486
+@inproceedings{zhu2021bars,
+  author    = {Zhu, Jieming and Liu, Jinyang and Yang, Shuai and Zhang, Qi and He, Xiuqiang},
+  title     = {Open Benchmarking for Click-Through Rate Prediction},
+  booktitle = {Proceedings of the 30th ACM International Conference on Information \& Knowledge Management},
+  year      = {2021},
+  pages     = {2759--2769},
+  doi       = {10.1145/3459637.3482486}
+}
+
+% ---- Datasets ---------------------------------------------------------------
+% verified: https://doi.org/10.1145/3511808.3557624
+@inproceedings{gao2022kuairand,
+  author    = {Gao, Chongming and Li, Shijun and Zhang, Yuan and Chen, Jiawei and Li, Biao and Lei, Wenqiang and Jiang, Peng and He, Xiangnan},
+  title     = {{KuaiRand}: An Unbiased Sequential Recommendation Dataset with Randomly Exposed Videos},
+  booktitle = {Proceedings of the 31st ACM International Conference on Information \& Knowledge Management},
+  year      = {2022},
+  pages     = {3953--3957},
+  doi       = {10.1145/3511808.3557624}
+}
+
+% ---- Added from docs/literature/novelty_check.md (verified by the literature agent) ----
+% verified: https://doi.org/10.1145/3770855.3818088
+@inproceedings{xia2026ridrec,
+  author    = {Xia, Jiangnan and Yang, Yu and Wang, Xiang and Liu, Ninghao},
+  title     = {Decomposing Predictive Roles of Semantic and Collaborative Information for Sequential Recommendation},
+  booktitle = {Proceedings of the 32nd ACM SIGKDD Conference on Knowledge Discovery and Data Mining V.2},
+  year      = {2026},
+  pages     = {5591--5601},
+  doi       = {10.1145/3770855.3818088}
+}
+
+% verified: https://doi.org/10.1145/3715876
+@article{lin2025cmdl,
+  author  = {Lin, Xixun and Liu, Rui and Cao, Yanan and Zou, Lixin and Li, Qian and Wu, Yongxuan and Liu, Yang and Yin, Dawei and Xu, Guandong},
+  title   = {Contrastive Modality-Disentangled Learning for Multimodal Recommendation},
+  journal = {ACM Transactions on Information Systems},
+  volume  = {43},
+  number  = {3},
+  pages   = {1--31},
+  year    = {2025},
+  doi     = {10.1145/3715876}
+}
+
+% verified: https://arxiv.org/abs/2509.20225
+@article{wang2025mrdib,
+  author  = {Wang, Hui and Qin, Jinghui and Wen, Wushao and Li, Qingling and Zhong, Shanshan and Huang, Zhongzhan},
+  title   = {Multimodal Representation-disentangled Information Bottleneck for Multimodal Recommendation},
+  journal = {arXiv preprint arXiv:2509.20225},
+  year    = {2025}
+}
+
+% verified: https://home.ttic.edu/~salzmann/papers/JiaSalzmannDarrellNIPS10.pdf
+@inproceedings{jia2010factorized,
+  author    = {Jia, Yangqing and Salzmann, Mathieu and Darrell, Trevor},
+  title     = {Factorized Latent Spaces with Structured Sparsity},
+  booktitle = {Advances in Neural Information Processing Systems},
+  volume    = {23},
+  year      = {2010}
+}
+
+% verified: https://doi.org/10.1109/TKDE.2022.3155408 (early access; final volume/pages not checked)
+@article{zhu2022vbae,
+  author  = {Zhu, Yaochen and Chen, Zhenzhong},
+  title   = {Variational Bandwidth Auto-encoder for Hybrid Recommender Systems},
+  journal = {IEEE Transactions on Knowledge and Data Engineering},
+  year    = {2022},
+  doi     = {10.1109/TKDE.2022.3155408}
+}
+
+% verified: https://arxiv.org/abs/2603.22916
+@article{zhu2026gatesid,
+  author  = {Zhu, Hai and Yu, Yantao and Shen, Lei and Wang, Bing and Zeng, Xiaoyi},
+  title   = {{GateSID}: Adaptive Gating for Balancing Semantic and Collaborative Signals in Recommendation},
+  journal = {arXiv preprint arXiv:2603.22916},
+  year    = {2026}
+}
+
+% verified: https://doi.org/10.1109/ISIT45174.2021.9517710
+@inproceedings{ginart2021mde,
+  author    = {Ginart, Antonio A. and Naumov, Maxim and Mudigere, Dheevatsa and Yang, Jiyan and Zou, James},
+  title     = {Mixed Dimension Embeddings with Application to Memory-Efficient Recommendation Systems},
+  booktitle = {2021 IEEE International Symposium on Information Theory (ISIT)},
+  year      = {2021},
+  pages     = {2786--2791},
+  doi       = {10.1109/ISIT45174.2021.9517710}
+}
+
+% verified: https://doi.org/10.1109/ICDM51629.2021.00101
+@inproceedings{zhao2021autoemb,
+  author    = {Zhao, Xiangyu and Liu, Haochen and Fan, Wenqi and Liu, Hui and Tang, Jiliang and Wang, Chong and Chen, Ming and Zheng, Xudong and Liu, Xiaobing and Yang, Xiwang},
+  title     = {{AutoEmb}: Automated Embedding Dimensionality Search in Streaming Recommendations},
+  booktitle = {2021 IEEE International Conference on Data Mining (ICDM)},
+  year      = {2021},
+  pages     = {896--905},
+  doi       = {10.1109/ICDM51629.2021.00101}
+}
+
+% verified: https://doi.org/10.1145/3543507.3583361
+@inproceedings{yang2023dcrec,
+  author    = {Yang, Yuhao and Huang, Chao and Xia, Lianghao and Huang, Chunzhen and Luo, Da and Lin, Kangyi},
+  title     = {Debiased Contrastive Learning for Sequential Recommendation},
+  booktitle = {Proceedings of the ACM Web Conference 2023},
+  year      = {2023},
+  pages     = {1063--1073},
+  doi       = {10.1145/3543507.3583361}
+}
+% verified: https://doi.org/10.1145/3477495.3531967
+@inproceedings{cao2022disencdr,
+  author    = {Cao, Jiangxia and Lin, Xixun and Cong, Xin and Ya, Jing and Liu, Tingwen and Wang, Bin},
+  title     = {{DisenCDR}: Learning Disentangled Representations for Cross-Domain Recommendation},
+  booktitle = {Proceedings of the 45th International ACM SIGIR Conference on Research and Development in Information Retrieval},
+  year      = {2022},
+  pages     = {267--277},
+  doi       = {10.1145/3477495.3531967}
+}
+
+% verified: https://doi.org/10.1109/ICDE53745.2022.00211
+@inproceedings{cao2022cdrib,
+  author    = {Cao, Jiangxia and Sheng, Jiawei and Cong, Xin and Liu, Tingwen and Wang, Bin},
+  title     = {Cross-Domain Recommendation to Cold-Start Users via Variational Information Bottleneck},
+  booktitle = {2022 IEEE 38th International Conference on Data Engineering (ICDE)},
+  year      = {2022},
+  pages     = {2209--2223},
+  doi       = {10.1109/ICDE53745.2022.00211}
+}
+
+% verified: https://arxiv.org/abs/2101.07577
+@inproceedings{liu2021pep,
+  author    = {Liu, Siyi and Gao, Chen and Chen, Yihong and Jin, Depeng and Li, Yong},
+  title     = {Learnable Embedding Sizes for Recommender Systems},
+  booktitle = {International Conference on Learning Representations},
+  year      = {2021}
+}
+
+% verified: https://arxiv.org/abs/2601.20028
+@article{kaushik2026groupsae,
+  author  = {Kaushik, Chiraag and Barch, Davis and Fanelli, Andrea},
+  title   = {Decomposing Multimodal Embedding Spaces with Group-Sparse Autoencoders},
+  journal = {arXiv preprint arXiv:2601.20028},
+  year    = {2026}
+}
+
+% verified: https://arxiv.org/abs/2604.14114
+@article{zhou2026mvcrec,
+  author  = {Zhou, Xiaofan and Lee, Kyumin},
+  title   = {{ID} and Graph View Contrastive Learning with Multi-View Attention Fusion for Sequential Recommendation},
+  journal = {arXiv preprint arXiv:2604.14114},
+  year    = {2026}
+}
+
+% verified: https://doi.org/10.1145/3701551.3703567
+@inproceedings{liu2025geinsparse,
+  author    = {Liu, Xuanzhou and Xiao, Zhibo and Yang, Luwei and Xue, Hansheng and Ma, Jianxing and Yang, Yujiu},
+  title     = {Improving {CTR} Prediction with Graph-Enhanced Interest Networks for Sparse Behavior Sequences},
+  booktitle = {Proceedings of the Eighteenth ACM International Conference on Web Search and Data Mining},
+  year      = {2025},
+  pages     = {876--884},
+  doi       = {10.1145/3701551.3703567}
+}
+
+% verified: https://doi.org/10.1145/3626772.3657716
+@inproceedings{liu2024selfgnn,
+  author    = {Liu, Yuxi and Xia, Lianghao and Huang, Chao},
+  title     = {{SelfGNN}: Self-Supervised Graph Neural Networks for Sequential Recommendation},
+  booktitle = {Proceedings of the 47th International ACM SIGIR Conference on Research and Development in Information Retrieval},
+  year      = {2024},
+  pages     = {1609--1618},
+  doi       = {10.1145/3626772.3657716}
+}
+
+% verified: https://aclanthology.org/2020.acl-main.331/
+@inproceedings{wu2020mind,
+  author    = {Wu, Fangzhao and Qiao, Ying and Chen, Jiun-Hung and Wu, Chuhan and Qi, Tao and Lian, Jianxun and Liu, Danyang and Xie, Xing and Gao, Jianfeng and Wu, Winnie and Zhou, Ming},
+  title     = {{MIND}: A Large-scale Dataset for News Recommendation},
+  booktitle = {Proceedings of the 58th Annual Meeting of the Association for Computational Linguistics},
+  year      = {2020},
+  pages     = {3597--3606}
+}
+
+% VERIFY: https://arxiv.org/abs/2106.06467 (check author list and whether a venue version exists)
+@article{hao2021zhihurec,
+  author  = {Hao, Bin and Zhang, Min and Ma, Weizhi and Shi, Shaoyun and Yu, Xinxing and Shan, Houzhi and Liu, Yiqun and Ma, Shaoping},
+  title   = {A Large-Scale Rich Context Query and Recommendation Dataset in Online Knowledge-Sharing},
+  journal = {arXiv preprint arXiv:2106.06467},
+  year    = {2021}
+}

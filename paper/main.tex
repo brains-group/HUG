@@ -1,0 +1,623 @@
+%% =============================================================================
+%% WWW 2027 (ACM Web Conference) research track submission -- DRAFT SCAFFOLD
+%% Template per CFP: \documentclass[sigconf, anonymous, review]{acmart}
+%% Long paper: 8 content pages + references + optional appendix (12 pages max).
+%% Track: "User Modeling, Personalization and Agentic Web Users" (chosen at submission).
+%%
+%% Build:  ~/.local/bin/tectonic main.tex     (from the paper/ directory)
+%%
+%% IMPORTANT (WWW'27 policy): LLMs may only help rephrase text; authors are
+%% solely responsible for the content. This file is a structural scaffold written
+%% with an assistant -- rewrite the prose in your own words before submission.
+%% Red [..] = result placeholder. Blue [Note: ..] = guidance for the authors;
+%% set \shownotesfalse to hide notes.
+%% =============================================================================
+\documentclass[sigconf,anonymous,review]{acmart}
+
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{amsmath}
+\usepackage{xcolor}
+
+%% ---- Section heading case ----------------------------------------------------
+%% acmart sigconf sets section titles in ALL CAPS. \plainheadingstrue keeps the
+%% author's capitalisation. This modifies the official template: set it to
+%% \plainheadingsfalse before submission unless the chairs confirm it's allowed.
+\newif\ifplainheadings \plainheadingstrue
+\ifplainheadings
+  \makeatletter
+  \def\@secfont{\sffamily\bfseries\section@raggedright}
+  \makeatother
+\fi
+
+%% ---- Drafting macros ---------------------------------------------------------
+\newif\ifshownotes \shownotestrue
+\newcommand{\tbd}[1]{\textcolor{red}{[#1]}}
+\newcommand{\note}[1]{\ifshownotes\textcolor{blue}{[Note: #1]}\fi}
+\newcommand{\method}{\textsc{Hug}}      % working name -- rename freely
+\newcommand{\figplaceholder}[2]{%
+  \fbox{\parbox[c][#1][c]{0.95\linewidth}{\centering\small\textcolor{red}{#2}}}}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\bm}[1]{\boldsymbol{#1}}
+
+%% ---- ACM metadata (placeholders; filled at camera-ready) --------------------
+\setcopyright{acmlicensed}
+\copyrightyear{2027}
+\acmYear{2027}
+\acmDOI{XXXXXXX.XXXXXXX}
+\acmConference[WWW '27]{Proceedings of the ACM Web Conference 2027}{May 10--14, 2027}{Seoul, Republic of Korea}
+\acmISBN{978-1-4503-XXXX-X/2027/05}
+
+\begin{document}
+
+\title{Shared or Specific? Evidence-Adaptive Sparse Fusion of Graph and Sequence Views for Click-Through Rate Prediction}
+\note{Title is a working title. Alternatives: ``Separate, Then Fuse: \dots''.}
+
+\author{Anonymous Author(s)}
+\affiliation{\institution{Anonymous Institution}\country{}}
+
+\begin{abstract}
+Modern click-through rate (CTR) models draw on two complementary sources of
+evidence: the relational structure linking users, items, creators and
+categories, and the user's recent behaviour sequence. Graph encoders capture
+the former and sequence transformers the latter, but the two views are almost
+always fused by concatenation followed by an MLP. We argue that this is the
+weak link. The views overlap substantially, so concatenation counts shared
+evidence twice. It also lets the stronger sequence view dominate exactly
+where the structural view is most valuable: long-tail items with little or no
+interaction history. We propose \method{}, which keeps the two views separate
+through encoding and then fuses them by decomposing each into sparse codes
+over a \emph{shared} dictionary and \emph{view-private} dictionaries. The
+number of active codes adapts to how much evidence each prediction rests on,
+so sparse-evidence cases fall back to shared, prior-like codes. Under a
+strictly causal evaluation protocol on three datasets (short video, news and
+Q\&A), \method{} improves AUC by \tbd{x.xx\%} over the strongest tuned
+baseline. The gains concentrate on cold items (\tbd{+x.xx} AUC in the
+lowest-evidence bucket). The learned decomposition also quantifies how much
+information the two views share (\tbd{xx\%}). We further show that two common
+shortcuts, frozen graph encoders and item statistics aggregated over the whole
+window, change conclusions: \tbd{frozen graph encoders underperform a
+features-only control by x.xx AUC}.
+\end{abstract}
+
+\begin{CCSXML}
+<ccs2012>
+<concept>
+<concept_id>10002951.10003317.10003347.10003350</concept_id>
+<concept_desc>Information systems~Recommender systems</concept_desc>
+<concept_significance>500</concept_significance>
+</concept>
+</ccs2012>
+\end{CCSXML}
+\ccsdesc[500]{Information systems~Recommender systems}
+
+\keywords{CTR prediction, graph neural networks, sequential recommendation, multi-view fusion, sparse representations}
+
+\maketitle
+
+%% =============================================================================
+\section{Introduction}
+%% =============================================================================
+
+Predicting whether a user will click an item is the core of web-scale
+recommendation. Two kinds of evidence dominate modern CTR models. The first is
+\emph{relational}. Users interact with items; items are made by creators and
+tagged with categories. This structure is slow-changing, and graph encoders in
+the LightGCN family exploit it well~\cite{he2020lightgcn,yu2022simgcl}. The
+second is \emph{sequential}. The user's most recent actions reveal their
+current intent, which transformer-based history encoders capture with target
+attention~\cite{zhou2018din,chen2019bst,xia2023transact,zhai2024hstu}.
+
+Both views are useful, and many systems combine them~\cite{chang2021surge,wang2020gcegnn,zhang2022gcl4sr}.
+The way they are combined has received far less scrutiny than the encoders.
+The default is to concatenate the view embeddings and let an MLP sort it out.
+We argue that this default is the weak link, for two reasons.
+
+\emph{The views overlap.} An item's graph neighbourhood and the sequences it
+appears in are generated by the same users clicking the same items, so much
+of what one view encodes the other encodes too. An MLP over the concatenation
+has no inductive pressure to separate redundant evidence from complementary
+evidence, and it double-counts the former.
+
+\emph{The views are unequally reliable, and the imbalance shifts with the
+amount of evidence.} When a candidate item has a rich history, the sequence
+view is strong and the structural view adds little. For long-tail items,
+which make up \tbd{58\% of validation impressions on KuaiRand-1K}
+\note{from the Spec 01 cold bucket; re-measure on the final protocol}, the
+sequence view has little to say about the candidate. The structural view is
+then the main route by which signal reaches the item: through its creator,
+its categories and co-engaging users. A fusion that weights views the same
+way for every input cannot express this shift.
+
+These observations suggest a different design principle: \emph{keep the
+views separate long enough to measure what each contributes, then fuse them
+in a way that is explicit about shared versus view-specific information and
+that adapts to the available evidence.} \method{} implements this principle.
+Each view is encoded by a standard, strong encoder: a relation-aware LightGCN
+with contrastive regularisation for structure, and a target-attention
+transformer for sequence. The novelty lies in the fusion. Each view's
+representation is projected onto sparse codes over a dictionary shared by both
+views plus a private dictionary per view. A cross-view alignment objective
+makes the shared codes agree; a decorrelation objective keeps the private codes
+complementary. The number of active codes is governed by an evidence-dependent
+budget: predictions resting on little evidence are pushed towards a few shared
+atoms, while well-supported predictions may use many private atoms. The
+downstream MLP thus receives a representation that is sparse, separates
+redundant from complementary evidence, and is calibrated to how much the model
+actually knows.
+
+We deliberately use standard encoders. This isolates the contribution: every
+fusion variant we compare sees identical encoder outputs, so differences are
+attributable to fusion alone. The design also yields a quantity that
+concatenation cannot provide: the fraction of predictive information the two
+views share. That fraction can be reported, and it can be analysed by evidence
+level.
+
+A second, methodological thread runs through the paper. Graph-based CTR
+pipelines are unusually easy to leak: interaction edges, item popularity
+statistics and session structure computed over the full log all contain
+future information~\cite{ji2023leakage}. We evaluate under a strict
+point-in-time protocol, in which every input for an impression at time $t$
+uses only interactions before $t$. We pair it with a features-only control.
+We show that this matters: \tbd{under the causal protocol, a frozen
+(randomly initialised) graph encoder underperforms the features-only control
+by x.xx AUC, and whole-window item statistics inflate a sequential baseline's
+training-time AUC while collapsing its validation AUC}.
+
+\paragraph{Contributions.}
+\begin{itemize}
+  \item We identify concatenation-based fusion of graph and sequence views as a
+        bottleneck in CTR prediction. We show empirically that it underuses the
+        structural view on long-tail items \tbd{evidence: Fig.~\ref{fig:motivation}}.
+  \item We propose \method{}, an evidence-conditioned sparse fusion layer.
+        It encodes the graph and sequence views as sparse codes over a shared
+        dictionary and view-private dictionaries. Each view's budget of private
+        atoms is set per impression from the interaction evidence available
+        \emph{to that view}, so poorly supported views are forced onto atoms
+        both views agree on (\S\ref{sec:fusion}). To our knowledge, this is the
+        first fusion layer for CTR whose shared/private allocation is tied to
+        per-impression evidence. Because the codes are sparse, the same mechanism
+        yields a countable, per-prediction measure of view overlap.
+  \item We describe and release a causal evaluation protocol for graph-based CTR
+        models: time-masked graph snapshots, point-in-time features, a
+        features-only control, and enforced test-set isolation. We show how common
+        shortcuts change conclusions (\S\ref{sec:protocol}, RQ5).
+  \item On three datasets (short video, news, Q\&A), \method{} outperforms tuned sequential,
+        feature-interaction and graph-based CTR baselines
+        \tbd{by x.xx--x.xx AUC}, with gains concentrated where the mechanism predicts.
+        The learned decomposition reveals \tbd{finding about shared vs.\ private
+        information across evidence levels}.
+\end{itemize}
+
+\begin{figure}[t]
+  \centering
+  \figplaceholder{3.6cm}{Motivation figure: AUC by candidate-item evidence bucket
+  (0 / 1--4 / $\geq$5 prior interactions) for sequence-only, graph-only,
+  concat fusion, and \method{}. Expected shape: concat $\approx$ max(single views)
+  in the cold bucket, while \method{} exceeds both.}
+  \caption{\tbd{Concatenation fusion fails to combine the views where evidence
+  is scarce.} \note{Populate from heavy-run arms N1, N2, N4 plus the \method{} run.}}
+  \label{fig:motivation}
+\end{figure}
+
+%% =============================================================================
+\section{Related Work}
+%% =============================================================================
+
+\paragraph{Graph-based recommendation.}
+Graph neural networks propagate collaborative signal over user--item graphs.
+LightGCN~\cite{he2020lightgcn} showed that removing feature transforms and
+nonlinearities improves collaborative filtering, and contrastive variants
+(SimGCL, XSimGCL~\cite{yu2022simgcl,yu2023xsimgcl}) further help long-tail
+items. Heterogeneous and knowledge-aware models
+(R-GCN, KGAT, HGT~\cite{schlichtkrull2018rgcn,wang2019kgat,hu2020hgt})
+model typed relations. Benchmarking studies, however, find that well-tuned
+simple models are hard to beat~\cite{lv2021simplehgn,dacrema2019progress,rendle2020ncf}.
+Precomputed, parameter-free propagation (SGC, SIGN~\cite{wu2019sgc,frasca2020sign})
+can rival trained message passing. This motivates our frozen-encoder control.
+
+\paragraph{Sequential CTR models.}
+DIN~\cite{zhou2018din} introduced target attention over behaviour histories.
+BST, SASRec and TransAct~\cite{chen2019bst,kang2018sasrec,xia2023transact}
+use transformers, and HSTU~\cite{zhai2024hstu} and
+WuKong~\cite{zhang2024wukong} study scaling. Feature-interaction models such
+as DCNv2 and Fi-GNN~\cite{wang2021dcnv2,li2019fignn} model cross features
+without user--item graphs.
+
+\paragraph{Combining graphs and sequences.}
+SR-GNN and GCE-GNN~\cite{wu2019srgnn,wang2020gcegnn} build graphs from
+sessions. SURGE~\cite{chang2021surge} constructs interest graphs from
+sequences. GCL4SR, MCLSR and MVCrec~\cite{zhang2022gcl4sr,wang2022mclsr,zhou2026mvcrec}
+align graph and sequence views with contrastive objectives, and
+SelfGNN~\cite{liu2024selfgnn} combines graph and sequential self-supervision.
+DCRec~\cite{yang2023dcrec} unifies sequential patterns with a global
+collaborative graph through cross-view contrast, using popularity-aware
+augmentation weights. In CTR, graph-enhanced interest networks target users
+with sparse behaviour sequences~\cite{liu2025geinsparse}. These works differ
+mainly in how each view is \emph{encoded} and aligned. Fusion is usually
+concatenation, attention or a learned gate. Our focus is the fusion layer
+itself: what is shared, what is view-specific, and how the allocation between
+the two should depend on each view's evidence.
+
+\paragraph{Shared/private decomposition.}
+Separating view-invariant from view-specific factors is established in
+multimodal learning (MISA~\cite{hazarika2020misa}; the multi-view information
+bottleneck~\cite{federici2020mib}) and has been carried into recommendation.
+CMDL~\cite{lin2025cmdl} and MRdIB~\cite{wang2025mrdib} disentangle modalities,
+DisenCDR~\cite{cao2022disencdr} and CDRIB~\cite{cao2022cdrib} separate
+domain-shared from domain-specific user factors, and RIDRec~\cite{xia2026ridrec}
+decomposes the predictive roles of semantic and collaborative signals into
+shared and unique parts, arguing against concatenation. Shared and private
+\emph{sparse dictionaries} date back to factorised latent spaces with
+structured sparsity~\cite{jia2010factorized}. Recent group-sparse autoencoders
+study when multimodal dictionaries truly share atoms~\cite{kaushik2026groupsae}.
+\method{} adopts this decomposition with sparse codes, applies it to the
+graph and sequence views of a CTR model, and, unlike prior work, makes the
+shared/private allocation depend on evidence.
+
+\paragraph{Evidence-adaptive capacity.}
+Tying representation capacity to popularity is a mature idea in
+recommendation. Mixed-dimension embeddings~\cite{ginart2021mde}, AutoEmb~\cite{zhao2021autoemb}
+and PEP~\cite{liu2021pep} size embeddings by frequency or learned pruning.
+VBAE~\cite{zhu2022vbae} fuses a collaborative and a feature view through a
+user-dependent information channel whose bandwidth reflects how sufficient
+the collaborative evidence is. GateSID~\cite{zhu2026gatesid} gates semantic and
+collaborative signals by item maturity, with stronger alignment for cold items.
+\method{} differs in where and how capacity adapts. Adaptation happens per
+impression inside the fusion layer, acts \emph{asymmetrically} on private
+versus shared atoms, and is driven by a separate evidence signal for each view.
+Throughout, ``evidence'' means an interaction-count proxy
+(\S\ref{sec:fusion}), not the Dirichlet evidence of evidential deep learning.
+Sparse coding tools~\cite{makhzani2014ksparse,gao2024sae,louizos2018l0} and
+information-bottleneck objectives~\cite{tishby2000ib,alemi2017vib} underpin the
+mechanism. In recommendation, discrete codes appear mainly as item
+tokenisers~\cite{rajput2023tiger}, and embedding collapse has been studied at
+scale~\cite{guo2024collapse}.
+
+\paragraph{Evaluation rigour.}
+Data leakage in offline recommender evaluation is well documented~\cite{ji2023leakage},
+as are tuning disparities between proposed models and
+baselines~\cite{dacrema2019progress,rendle2020ncf,zhu2021bars}. CTR models
+with ID embeddings are known to overfit after one epoch~\cite{zhang2022oneepoch}.
+Our protocol extends point-in-time evaluation to graph inputs.
+
+%% =============================================================================
+\section{Problem Setting and Causal Protocol}
+\label{sec:protocol}
+%% =============================================================================
+
+\paragraph{Data.}
+Let $\mathcal{U}, \mathcal{V}, \mathcal{A}, \mathcal{C}$ denote users, items,
+creators (authors) and categories. The log is a time-ordered set of impressions
+$\mathcal{L} = \{(u, v, t, y, \bm{x})\}$, where $y \in \{0,1\}$ indicates a
+click and $\bm{x}$ holds context (e.g., page tab, hour). The task is to estimate
+$P(y = 1 \mid u, v, t, \mathcal{H}_{<t})$, where $\mathcal{H}_{<t}$ is the
+information available strictly before $t$.
+
+\paragraph{Point-in-time rule.}
+Every input for an impression at time $t$ is computed from interactions with
+timestamp $< t$. This covers graph edges, item statistics, behaviour histories
+and ID vocabularies. Model weights are fit on a training period that strictly
+precedes validation and test, using a global chronological split
+(\tbd{70/10/20}). Ties never straddle a boundary.
+
+\paragraph{Time-masked graph snapshots.}
+We build one heterogeneous graph with relations $\mathcal{R}$: user--item
+feedback (click, like, dislike, comment, forward), item--creator,
+item--category and item--item transitions, plus reverse relations. Every
+behavioural edge carries its timestamp. The timeline is cut at boundaries
+$b_0 < b_1 < \dots$ (daily, with the split points inserted). An impression in
+$[b_k, b_{k+1})$ is encoded from snapshot $\mathcal{G}_k$, which contains only
+edges with time $< b_k$; degree normalisation is computed from $\mathcal{G}_k$
+alone. Item popularity statistics are computed per row from strictly earlier
+interactions.
+
+\paragraph{Controls and test isolation.}
+Every comparison includes a \emph{features-only} control: the same head and
+inputs with no graph or sequence encoder. Hyperparameters are selected on
+validation with an equal trial budget for every model. Test is scored once
+per reported configuration, and the harness enforces and logs this.
+
+%% =============================================================================
+\section{Method}
+%% =============================================================================
+
+\method{} (\emph{Heterogeneous Unified Graph}) is built on a single
+heterogeneous, time-stamped graph: users, items, creators and categories,
+linked by every feedback type and by in-session transitions. This graph is
+\emph{unified} in the sense that it is the one source of truth for both
+views. The graph view propagates over its time-masked snapshots, and the
+sequence view reads behaviour histories from the same timestamped
+interactions under the same point-in-time rule. The model is deliberately
+not unified: the views stay separate until fusion.
+Figure~\ref{fig:arch} gives an overview. \method{} has three stages:
+(i) a shared input layer, (ii) two view encoders run in parallel, and
+(iii) evidence-adaptive sparse fusion followed by a prediction head.
+
+\begin{figure*}[t]
+  \centering
+  \figplaceholder{4.2cm}{Architecture figure: input layer $\rightarrow$
+  [graph view: relation-aware LightGCN on snapshot $\mathcal{G}_k$] and
+  [sequence view: history transformer + target attention] $\rightarrow$
+  sparse encoders onto shared dictionary $D^{\mathrm{sh}}$ and private
+  dictionaries $D^{\mathrm{G}}, D^{\mathrm{S}}$ with evidence-dependent budget
+  $\rightarrow$ MLP head.}
+  \caption{Overview of \method{}.}
+  \label{fig:arch}
+\end{figure*}
+
+\subsection{Input layer}
+Each node receives an initial embedding
+$\bm{h}^{(0)} \in \R^d$ that combines an ID embedding with projected features.
+ID vocabularies are built from the training period only; IDs seen fewer than
+$m$ times share an out-of-vocabulary row. Creators and categories are
+represented by ID embeddings.
+
+\subsection{Graph view}
+We use a relation-aware variant of LightGCN. For layer $l$,
+\begin{equation}
+  \bm{h}^{(l+1)}_i = \sum_{r \in \mathcal{R}} \pi^{(l)}_r
+    \sum_{j \in \mathcal{N}_r(i)} \frac{\bm{h}^{(l)}_j}{\sqrt{|\mathcal{N}_r(i)|\,|\mathcal{N}_r(j)|}},
+\end{equation}
+with $\bm{\pi}^{(l)} = \mathrm{softmax}(\bm{a}^{(l)})$,
+where neighbourhoods come from snapshot $\mathcal{G}_k$ and $\bm{a}^{(l)}$
+are learned relation logits. The graph representation is the layer mean
+$\bm{g}_i = \frac{1}{L+1}\sum_{l=0}^{L} \bm{h}^{(l)}_i$. Following
+XSimGCL~\cite{yu2023xsimgcl}, we add a cross-layer contrastive term
+$\mathcal{L}_{\mathrm{cl}}$ over the users and items in each batch. The
+graph-view input to fusion is
+$\bm{e}^{\mathrm{G}} = [\bm{g}_u \,\|\, \bm{g}_v \,\|\, \bm{g}_u \odot \bm{g}_v]$.
+
+\subsection{Sequence view}
+For an impression $(u, v, t)$, the history $S_u(t)$ is the user's last $N$
+clicked items before $t$. Each token is the item's input embedding plus
+embeddings of recency rank, log-bucketed time gap and a same-session flag. A
+light transformer encodes the tokens. The candidate item queries the outputs
+by target attention, giving $\bm{e}^{\mathrm{S}}$.
+
+\subsection{Evidence-adaptive sparse fusion}
+\label{sec:fusion}
+\note{The method is specified (docs/specs/05-sparse-fusion.md) but not yet
+implemented. Finalise the equations once validation selects between the top-$k$
+schedule and hard-concrete gates.}
+
+\paragraph{Per-view evidence.}
+Each view's reliability depends on the support it has for this particular
+prediction. We define, from interactions strictly before $t$,
+\begin{align}
+  n^{\mathrm{G}} &= \log(1+c_v) + \log(1+c_{a(v)}), \\
+  n^{\mathrm{S}} &= \log(1+|S_u(t)|) + \log(1+c_v),
+\end{align}
+where $c_v$ and $c_{a(v)}$ are the prior interaction counts of the candidate
+item and of its creator, and $|S_u(t)|$ is the user's history length. A new
+video by an active creator thus has strong graph support but weak sequence
+support. This asymmetry is what lets the structural view carry cold items.
+
+\paragraph{Shared and private dictionaries.}
+Each view's input is projected to $\bm{p}^{\nu} = \mathrm{LN}(W^{\nu}\bm{e}^{\nu}) \in \R^{d'}$,
+$\nu \in \{\mathrm{G}, \mathrm{S}\}$. We learn a shared dictionary
+$D^{\mathrm{sh}} \in \R^{m_s \times d'}$ and private dictionaries
+$D^{\mathrm{G}}, D^{\mathrm{S}} \in \R^{m_p \times d'}$, with unit-norm atoms.
+An encoder maps each view to non-negative codes over the shared atoms and its
+own private atoms,
+$[\bm{a}^{\nu,\mathrm{sh}} \,\|\, \bm{a}^{\nu,\mathrm{pr}}] = \mathrm{ReLU}(E^{\nu}\bm{p}^{\nu} + \bm{b}^{\nu})$.
+
+\paragraph{Evidence-dependent sparsity.}
+We keep the top $k_{\mathrm{sh}}$ shared codes for every impression. The
+number of private codes kept for view $\nu$ grows with that view's evidence:
+\begin{equation}
+  k^{\nu}_{\mathrm{pr}} = k_{\min} + \Big\lfloor (k_{\max} - k_{\min})\,
+     \min\!\big(1, n^{\nu}/n^{\nu}_{\mathrm{ref}}\big) \Big\rceil,
+\end{equation}
+where $n^{\nu}_{\mathrm{ref}}$ is the 95th percentile of $n^{\nu}$ over
+training impressions. Poorly supported views are therefore restricted to a few
+private atoms and must express themselves through atoms shared with the other
+view. Read through the information bottleneck~\cite{tishby2000ib,alemi2017vib},
+the schedule is a per-impression, per-view rate constraint. A soft alternative
+places hard-concrete gates~\cite{louizos2018l0} on the codes, with an expected-$L_0$
+penalty on private atoms weighted by $\lambda^{\nu}(n^{\nu}) = \lambda_0/(1+n^{\nu})$.
+\tbd{Report whichever validates better; the other goes in the appendix.}
+
+\paragraph{Objectives.}
+Shared codes from the two views should describe the same evidence, and private
+codes should carry what the other view lacks:
+\begin{align}
+  \mathcal{L}_{\mathrm{align}} &= \mathrm{InfoNCE}\big(\bm{a}^{\mathrm{G},\mathrm{sh}}, \bm{a}^{\mathrm{S},\mathrm{sh}}\big), \\
+  \mathcal{L}_{\mathrm{dec}}   &= \big\lVert \mathrm{Cov}\big(\bm{a}^{\mathrm{G},\mathrm{pr}}, \bm{a}^{\mathrm{S},\mathrm{pr}}\big) \big\rVert_F^2 / m_p^2, \\
+  \mathcal{L}_{\mathrm{rec}}   &= \textstyle\sum_{\nu} \big\lVert \mathrm{sg}(\bm{p}^{\nu}) - D^{\mathrm{sh}\top}\bm{a}^{\nu,\mathrm{sh}} - D^{\nu\top}\bm{a}^{\nu,\mathrm{pr}} \big\rVert_2^2 .
+\end{align}
+InfoNCE~\cite{oord2018infonce} uses in-batch negatives. $\mathcal{L}_{\mathrm{dec}}$
+is the linear-kernel case of HSIC~\cite{gretton2005hsic}. The reconstruction
+target is detached ($\mathrm{sg}$), so the projections cannot collapse towards
+whatever is easiest to reconstruct.
+
+\paragraph{Fused representation and head.}
+The head receives
+$\bm{z} = [\tfrac{1}{2}(\bm{a}^{\mathrm{G},\mathrm{sh}} + \bm{a}^{\mathrm{S},\mathrm{sh}})
+ \,\|\, \bm{a}^{\mathrm{G},\mathrm{pr}} \,\|\, \bm{a}^{\mathrm{S},\mathrm{pr}} \,\|\, \bm{x}]$
+and outputs a logit through an MLP. The training objective is
+\begin{equation}
+  \mathcal{L} = \mathcal{L}_{\mathrm{BCE}} + \alpha\,\mathcal{L}_{\mathrm{cl}}
+   + \beta\,\mathcal{L}_{\mathrm{align}} + \gamma\,\mathcal{L}_{\mathrm{dec}}
+   + \delta\,\mathcal{L}_{\mathrm{rec}}.
+\end{equation}
+The shared-mass ratio
+$\rho = \sum_{\nu}\lVert \bm{a}^{\nu,\mathrm{sh}}\rVert_1 / \sum_{\nu}\lVert \bm{a}^{\nu}\rVert_1$
+gives a per-prediction measure of view overlap. We also report the share of
+shared atoms that both views actually co-activate, which guards against shared
+atoms degenerating into private ones~\cite{kaushik2026groupsae}.
+
+\subsection{Complexity}
+\tbd{Per-step cost of graph propagation (sparse matrix products over
+$|\mathcal{E}_k|$ edges), the transformer ($O(N^2 d)$ per row) and fusion
+($O((m_s + m_g + m_q) d')$ per row); measured wall-clock in Appendix.}
+
+%% =============================================================================
+\section{Experiments}
+%% =============================================================================
+
+We address five research questions.
+\textbf{RQ1:} Does \method{} outperform strong, equally tuned baselines?
+\textbf{RQ2:} Is the gain attributable to fusion?
+\textbf{RQ3:} Where do the gains come from?
+\textbf{RQ4:} What do the shared and private codes capture?
+\textbf{RQ5:} How much do protocol shortcuts change conclusions?
+
+\subsection{Setup}
+
+\paragraph{Datasets.}
+KuaiRand-1K~\cite{gao2022kuairand} is a short-video log from Kuaishou
+containing 1{,}000 users and their impressions, with creator, category and
+multi-type feedback. MIND~\cite{wu2020mind} is a news-recommendation log with
+impressions, categories, subcategories and Wikidata entities. Articles churn
+daily, so most test impressions involve items never seen in training.
+ZhihuRec~\cite{hao2021zhihurec} is a Q\&A log with answers linked to authors,
+questions and topics, in which most test impressions come from users unseen in
+training. The three datasets cover three domains and both cold-start axes. For
+MIND and ZhihuRec we sample users at random (\tbd{20\% and 12.5\%}) and keep each
+sampled user's full log. ZhihuRec logs click times separately from impression
+times, so every label-derived input uses only labels \emph{known} before $t$.
+Table~\ref{tab:data} summarises the splits.
+
+\begin{table}[t]
+  \caption{Dataset statistics after preprocessing (global chronological split).}
+  \label{tab:data}
+  \small
+  \setlength{\tabcolsep}{3pt}
+  \begin{tabular}{lrrr}
+    \toprule
+    & KuaiRand-1K & MIND & ZhihuRec \\
+    \midrule
+    Users              & \tbd{1,000} & \tbd{} & \tbd{} \\
+    Items              & \tbd{4.37M} & \tbd{} & \tbd{} \\
+    Train / val / test (M) & 8.19 / 1.17 / 2.34 & \tbd{} & \tbd{} \\
+    Click rate         & 0.379 & \tbd{} & \tbd{} \\
+    Cold-item test share & \tbd{} & \tbd{} & \tbd{} \\
+    Cold-user test share & \tbd{} & \tbd{} & \tbd{} \\
+    \bottomrule
+  \end{tabular}
+  \note{Re-verify every figure from the final preprocessing logs.}
+\end{table}
+
+\paragraph{Baselines.}
+Sequential CTR: TransAct~\cite{xia2023transact}. Scaling and feature
+interaction: WuKong~\cite{zhang2024wukong}\tbd{, DCNv2~\cite{wang2021dcnv2}}.
+GNN-based CTR: Fi-GNN~\cite{li2019fignn}. All baselines use the FuxiCTR
+implementations~\cite{zhu2021bars} with a pinned model zoo. Every baseline is
+given the same row inputs as \method{}: identical behaviour histories,
+point-in-time item statistics, context and categorical features. Each model,
+including \method{}, receives \tbd{16} tuning trials on validation.
+
+\paragraph{Fusion variants (RQ2).}
+All fusion variants use identical, jointly trained encoders and differ only in
+fusion: concatenation + MLP; gated fusion; an \emph{evidence-conditioned} gate
+(GateSID-style~\cite{zhu2026gatesid}, the gate sees $n^{\mathrm{G}}, n^{\mathrm{S}}$);
+mixture-of-experts routing~\cite{ma2018mmoe}; dense shared/private
+decomposition with the same losses (MISA/CMDL-style~\cite{hazarika2020misa,lin2025cmdl});
+\method{} with a constant sparsity budget; and full \method{}. The
+evidence-conditioned gate is the key competitor: it tests whether evidence
+adaptivity alone, without sparse shared/private codes, explains the gains.
+
+\paragraph{Metrics.}
+AUC, AP, LogLoss and per-user nDCG@10. We report means and standard deviations
+over \tbd{3} seeds. Significance uses a per-user paired bootstrap
+(1{,}000 resamples).
+
+\paragraph{Implementation.}
+\tbd{Embedding size, layers, dictionary sizes, optimiser, batch size, early
+stopping; hardware (2$\times$ 95\,GB GPUs).} Code and protocol are released
+at \tbd{anonymous link}.
+
+\subsection{RQ1: Overall performance}
+
+\begin{table}[t]
+  \caption{Test performance (mean $\pm$ std over seeds). Best in bold;
+  $^{\dagger}$ significant vs.\ best baseline ($p<0.05$).}
+  \label{tab:main}
+  \small
+  \setlength{\tabcolsep}{4pt}
+  \begin{tabular}{lcccc}
+    \toprule
+    Model & AUC & AP & LogLoss & nDCG@10 \\
+    \midrule
+    Features-only control & \tbd{} & \tbd{} & \tbd{} & \tbd{} \\
+    TransAct      & \tbd{} & \tbd{} & \tbd{} & \tbd{} \\
+    WuKong        & \tbd{} & \tbd{} & \tbd{} & \tbd{} \\
+    Fi-GNN        & \tbd{} & \tbd{} & \tbd{} & \tbd{} \\
+    \tbd{DCNv2}   & \tbd{} & \tbd{} & \tbd{} & \tbd{} \\
+    \midrule
+    Sequence view only & \tbd{} & \tbd{} & \tbd{} & \tbd{} \\
+    Graph view only    & \tbd{} & \tbd{} & \tbd{} & \tbd{} \\
+    Both, concat fusion & \tbd{} & \tbd{} & \tbd{} & \tbd{} \\
+    \textbf{\method{}} & \tbd{} & \tbd{} & \tbd{} & \tbd{} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\tbd{Narrative: \method{} vs.\ best baseline; whether the graph view adds over
+the sequence-only model; the features-only control as a floor.}
+
+\subsection{RQ2: Is the gain due to fusion?}
+\tbd{Table: fusion variants with identical encoders. Key comparisons:
+concat vs.\ \method{} (total effect of fusion); dense vs.\ sparse
+shared/private (effect of sparsity); fixed vs.\ adaptive budget (effect of
+evidence adaptivity).}
+
+\subsection{RQ3: Where do the gains come from?}
+\begin{figure}[t]
+  \centering
+  \figplaceholder{3.4cm}{AUC by candidate-item evidence (0 / 1--4 / $\geq$5)
+  and by user history length (0 / 1--9 / 10--49 / 50), for the best baseline,
+  concat fusion, and \method{}.}
+  \caption{Gains by evidence level.}
+  \label{fig:buckets}
+\end{figure}
+\tbd{Expected: the largest gains appear in low-evidence buckets, matching the
+budget mechanism.}
+
+\subsection{RQ4: What do shared and private codes capture?}
+\tbd{(a) Shared-mass ratio $\rho$ vs.\ evidence level: does low evidence shift
+mass to shared atoms? (b) Overall view overlap: average $\rho$, compared with
+CKA between view embeddings. (c) Atom interpretability: top creators and
+categories per atom. (d) Learned relation weights $\bm{\pi}^{(l)}$.}
+
+\subsection{RQ5: Do protocol shortcuts change conclusions?}
+\tbd{Table: (i) frozen random graph encoder vs.\ trained vs.\ features-only;
+(ii) whole-window vs.\ point-in-time item statistics for a sequential
+baseline; (iii) effect on the ranking of methods. Smoke-scale evidence so far
+suggests that frozen encoders fall below the features-only control; confirm
+at full scale.}
+
+%% =============================================================================
+\section{Conclusion}
+%% =============================================================================
+We argued that fusing graph and sequence views is a first-class design
+problem in CTR prediction, not an afterthought. \method{} keeps the views
+separate through encoding, then fuses them through sparse shared and private
+codes whose budget adapts to the available evidence. \tbd{Summary of gains and
+the overlap finding.} Our causal protocol and controls show that
+\tbd{protocol finding}. Limitations: \tbd{datasets with dense random exposure;
+online evaluation; dictionary size sensitivity}.
+
+%% =============================================================================
+\section*{Ethical Considerations}
+This work uses publicly released, anonymised interaction logs under their
+licences. No new user data were collected. Improved long-tail recommendation
+may affect creator exposure; we report results by item popularity to make such
+effects visible.
+
+\bibliographystyle{ACM-Reference-Format}
+\bibliography{references}
+
+\appendix
+\section{Protocol Details}
+\tbd{Snapshot construction, tie handling, ID vocabulary, holdout diagnostic,
+test-access logging.}
+
+\section{Hyperparameters and Tuning Budgets}
+\tbd{Search spaces and selected configurations for every model.}
+
+\section{Additional Results}
+\tbd{Validation tables, per-seed results, run time and memory.}
+
+\end{document}
