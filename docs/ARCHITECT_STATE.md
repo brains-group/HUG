@@ -2,6 +2,26 @@
 
 Read this first when resuming. Update it at the end of each session.
 
+## As of 2026-10-09 13:00 EDT (supersedes the 10-06 section below where they differ)
+
+- **Stage 1a (KuaiRand tuning) done 10-07**, best val AUC: DCNv2 0.7912, FiGNN 0.7912, N1 0.7812,
+  N4 0.7777. TransAct (0.7745) and WuKong (0.6677) were invalid: label leak through history ids
+  in the shared item vocabulary. Fixed in `1a2ffc3` (`--vocab-from-history 0`, only their 42 job
+  hashes change); leaky tunings archived in `~/HUG-heavy/runs/heavy/archive_leaky_vocab_20261009/`.
+- **D1 (history used?)**: yes. Cross-row history shuffle costs 0.012 (N1) / 0.022 (N4) val AUC;
+  zeroing N4's graph output costs 0.056. Not a sequence-encoder bug. `~/HUG/runs/dev/d1/`.
+- **05b probe passed**: P2 (sparse + dense skip) within 0.003 of max(concat, evgate) at epoch 3
+  and at epoch 1; dense skip on for sparse/misa (`79f355f`). See `specs/05b-fusion-fixes-results.md`.
+  KuaiRand Stage 1b drops `gate` and `moe` (compute).
+- **Running (brains, tmux `heavy`)**: `~/HUG-heavy` at `6cfc0d3`,
+  `runs/heavy/launch_stage1_close.sh` over `runs/heavy/stage1_close.jobs`: 152 jobs = every
+  KuaiRand + MIND job (Stage 1, fusion, final_eval) except gate/moe. Light jobs pack first. After a
+  reboot, rerun the launcher in tmux; finished jobs are skipped by hash.
+- **idea A100**: port check green (N4 1-epoch 0.7725 vs 0.7720). Told to pull, finish the ZhihuRec
+  smoke (N0/N1/N4, baseline smokes, dry run) and launch the ZhihuRec queue if green.
+- **Still open**: N4 < N1 on KuaiRand after tuning; MIND/ZhihuRec decide whether the graph view
+  helps under cold start. Then aggregate and fill `paper/` `\tbd{}`.
+
 ## As of 2026-10-06 22:15 EDT
 
 **Deadlines:** abstract 2026-10-18, paper 2026-10-25 (WWW'27, User Modeling track; draft in
