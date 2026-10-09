@@ -57,6 +57,48 @@ from test_guard import authorize_test_access  # noqa: E402
 
 MODELS = ("TransAct", "WuKong", "FiGNN", "DCNv2")
 
+# History columns share the item embedding table (share_embedding: video_id).  FuxiCTR's
+# merge_vocab then gives every history token with count >= min_categr_count its own item id.
+# Histories hold only clicked items, so "the target item is in the vocabulary" would mean
+# "this item has been clicked by someone": a label leak (KuaiRand, m=5: 28% of train rows had
+# an OOV target item with click rate 0.000).  Unless --vocab-from-history 1 (the old, leaky
+# behaviour, kept only to reproduce earlier runs), a history column gets a per-column
+# min_categr_count no token can reach, so the item vocabulary is fitted on the target-item
+# column alone and history tokens outside it map to OOV.  The per-column count takes precedence
+# over the global min_categr_count that tune.py searches.  Such datasets get their own
+# processed-data cache (dataset id suffix ITEM_VOCAB_SUFFIX), never the leaky one.
+HISTORY_VOCAB_MIN_COUNT = 10**9
+ITEM_VOCAB_SUFFIX = "_itemvocab"
+
+
+def _shares_item_vocab(col: dict) -> bool:
+    return col.get("type") == "sequence" and bool(col.get("share_embedding"))
+
+
+def apply_history_vocab(params: dict, vocab_from_history: bool) -> dict:
+    """Keep shared-embedding history tokens out of the item vocabulary (see above); in place."""
+    cols = params.get("feature_cols") or []
+    if vocab_from_history or not any(_shares_item_vocab(c) for c in cols):
+        return params                     # no history column (FiGNN, DCNv2): config unchanged
+    params["feature_cols"] = [dict(c, min_categr_count=HISTORY_VOCAB_MIN_COUNT)
+                              if _shares_item_vocab(c) else c for c in cols]
+    params["dataset_id"] = params["dataset_id"] + ITEM_VOCAB_SUFFIX
+    return params
+
+
+def resolve_dataset_params(model: str, dataset: str, overrides: dict | None,
+                           vocab_from_history: bool) -> dict:
+    """
+    FuxiCTR params for one run: model + dataset config, tuned overrides, history-vocab policy,
+    and a processed-data dataset id per vocabulary threshold (fitted on train.csv only).
+    """
+    from fuxictr.utils import load_config
+    params = load_config(str(CONFIG_DIR), model_config_id(model, dataset))
+    params.update(overrides or {})
+    apply_history_vocab(params, vocab_from_history)
+    params["dataset_id"] = f"{params['dataset_id']}_m{params['min_categr_count']}"
+    return params
+
 
 def model_config_id(model: str, dataset: str = "kuairand") -> str:
     """model_config.yaml entry: <model>_<kuairand_1k|mind|zhihurec>."""
@@ -168,13 +210,13 @@ def run(args) -> dict:
     from fuxictr.preprocess import FeatureProcessor
     from fuxictr.pytorch.dataloaders import RankDataLoader
     from fuxictr.pytorch.torch_utils import seed_everything
-    from fuxictr.utils import load_config, print_to_json, set_logger
+    from fuxictr.utils import print_to_json, set_logger
 
     src = _import_model_zoo(args.model)
-    params = load_config(str(CONFIG_DIR), model_config_id(args.model, args.dataset))
     CSV_DIR = csv_dir(args.dataset)
-    overrides = yaml.safe_load(Path(args.params).read_text()) if args.params else {}
-    params.update(overrides or {})
+    overrides = (yaml.safe_load(Path(args.params).read_text()) if args.params else None) or {}
+    params = resolve_dataset_params(args.model, args.dataset, overrides,
+                                    bool(args.vocab_from_history))
     # dataset_config.yaml paths are relative to Baselines/ (the repo can live anywhere)
     for key in ("data_root", "train_data", "valid_data", "test_data"):
         if params.get(key) and not os.path.isabs(params[key]):
@@ -186,8 +228,6 @@ def run(args) -> dict:
     if args.max_steps:
         params["epochs"] = 1
     params["verbose"] = 0 if is_quiet(args.quiet) else 1
-    # One processed-data cache per vocabulary threshold (fitted on train.csv only)
-    params["dataset_id"] = f"{params['dataset_id']}_m{params['min_categr_count']}"
     params["model_root"] = str(run_dir)
     params["model_id"] = args.model
     set_logger(params)
@@ -261,7 +301,8 @@ def run(args) -> dict:
         "test_is_dry_run_substitute": dry_substitute,
         "best_epoch": None, "params": {k: v for k, v in params.items()
                                        if isinstance(v, (int, float, str, bool, type(None)))},
-        "tuned": overrides, "n_params": n_params,
+        "tuned": overrides, "vocab_from_history": bool(args.vocab_from_history),
+        "n_params": n_params,
         "checkpoint_mb": round(ckpt.stat().st_size / 1e6, 1) if ckpt.exists() else None,
         "environment": environment_versions(),
         "git": git_state(),
@@ -288,6 +329,10 @@ def parse_args(argv=None):
     p.add_argument("--test-access-token", default=None)
     p.add_argument("--i-know-this-touches-test", action="store_true")
     p.add_argument("--config-hash", default=None)
+    p.add_argument("--vocab-from-history", type=int, choices=(0, 1), default=0,
+                   help="1 = history tokens enter the shared item vocabulary (old, label-leaking "
+                        "behaviour; only to reproduce earlier runs). 0 = item vocabulary from "
+                        "the target-item column only")
     p.add_argument("--data-dir", default=None, help="accepted for CLI symmetry; CSVs come from preprocess.py")
     return p.parse_args(argv)
 

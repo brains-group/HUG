@@ -19,6 +19,12 @@
 # Stage 1 (val only): tuning, HUG arms, baselines. Stage 2: final_eval jobs, the only jobs
 # that touch test (the queue adds --eval-test and a one-time token; never put it in args).
 # To run Stage 1 alone: --only 'tune_*' --only 'hug_*' --only 'baseline_*'.
+#
+# TransAct/WuKong jobs carry "--vocab-from-history 0": their history column shares the item
+# embedding, and letting history tokens into the item vocabulary leaked the click label (an item
+# was in-vocab essentially iff it had been clicked; see Baselines/train.py).  The explicit flag
+# also gives these jobs new config hashes, so exactly they rerun; jobs from before the fix
+# (dataset ids without "_itemvocab") are superseded.
 
 defaults:
   data_dir: KuaiRand-1K/data
@@ -61,13 +67,13 @@ jobs:
     depends_on: []
   - name: tune_baseline_TransAct
     kind: tune_baseline
-    args: "--model TransAct --trials 12 --seed 0"
+    args: "--model TransAct --trials 12 --seed 0 --vocab-from-history 0"
     memory: light
     group: tune_TransAct
     depends_on: []
   - name: tune_baseline_WuKong
     kind: tune_baseline
-    args: "--model WuKong --trials 12 --seed 0"
+    args: "--model WuKong --trials 12 --seed 0 --vocab-from-history 0"
     memory: light
     group: tune_WuKong
     depends_on: []
@@ -227,7 +233,7 @@ jobs:
   # ── Stage 1c: baselines at their best tuned settings, 3 seeds each ──
   - name: baseline_TransAct_s42
     kind: baseline
-    args: "--model TransAct {best:tune_baseline_TransAct}"
+    args: "--model TransAct {best:tune_baseline_TransAct} --vocab-from-history 0"
     seed: 42
     memory: light
     model: TransAct
@@ -235,7 +241,7 @@ jobs:
     depends_on: []
   - name: baseline_TransAct_s43
     kind: baseline
-    args: "--model TransAct {best:tune_baseline_TransAct}"
+    args: "--model TransAct {best:tune_baseline_TransAct} --vocab-from-history 0"
     seed: 43
     memory: light
     model: TransAct
@@ -243,7 +249,7 @@ jobs:
     depends_on: []
   - name: baseline_TransAct_s44
     kind: baseline
-    args: "--model TransAct {best:tune_baseline_TransAct}"
+    args: "--model TransAct {best:tune_baseline_TransAct} --vocab-from-history 0"
     seed: 44
     memory: light
     model: TransAct
@@ -251,7 +257,7 @@ jobs:
     depends_on: []
   - name: baseline_WuKong_s42
     kind: baseline
-    args: "--model WuKong {best:tune_baseline_WuKong}"
+    args: "--model WuKong {best:tune_baseline_WuKong} --vocab-from-history 0"
     seed: 42
     memory: light
     model: WuKong
@@ -259,7 +265,7 @@ jobs:
     depends_on: []
   - name: baseline_WuKong_s43
     kind: baseline
-    args: "--model WuKong {best:tune_baseline_WuKong}"
+    args: "--model WuKong {best:tune_baseline_WuKong} --vocab-from-history 0"
     seed: 43
     memory: light
     model: WuKong
@@ -267,7 +273,7 @@ jobs:
     depends_on: []
   - name: baseline_WuKong_s44
     kind: baseline
-    args: "--model WuKong {best:tune_baseline_WuKong}"
+    args: "--model WuKong {best:tune_baseline_WuKong} --vocab-from-history 0"
     seed: 44
     memory: light
     model: WuKong
@@ -825,14 +831,14 @@ jobs:
     depends_on: []
   - name: tune_baseline_TransAct_mind
     kind: tune_baseline
-    args: "--model TransAct --trials 8 --seed 0"
+    args: "--model TransAct --trials 8 --seed 0 --vocab-from-history 0"
     memory: light
     group: tune_TransAct@mind
     dataset: mind
     depends_on: []
   - name: tune_baseline_WuKong_mind
     kind: tune_baseline
-    args: "--model WuKong --trials 8 --seed 0"
+    args: "--model WuKong --trials 8 --seed 0 --vocab-from-history 0"
     memory: light
     group: tune_WuKong@mind
     dataset: mind
@@ -1009,7 +1015,7 @@ jobs:
   # ── mind: Stage 1c baselines (seeds 43/44 optional: best baseline only) ──
   - name: baseline_TransAct_s42_mind
     kind: baseline
-    args: "--model TransAct {best:tune_baseline_TransAct_mind}"
+    args: "--model TransAct {best:tune_baseline_TransAct_mind} --vocab-from-history 0"
     seed: 42
     memory: light
     model: TransAct
@@ -1018,7 +1024,7 @@ jobs:
     depends_on: []
   - name: baseline_TransAct_s43_mind
     kind: baseline
-    args: "--model TransAct {best:tune_baseline_TransAct_mind}"
+    args: "--model TransAct {best:tune_baseline_TransAct_mind} --vocab-from-history 0"
     seed: 43
     memory: light
     model: TransAct
@@ -1028,7 +1034,7 @@ jobs:
     depends_on: []
   - name: baseline_TransAct_s44_mind
     kind: baseline
-    args: "--model TransAct {best:tune_baseline_TransAct_mind}"
+    args: "--model TransAct {best:tune_baseline_TransAct_mind} --vocab-from-history 0"
     seed: 44
     memory: light
     model: TransAct
@@ -1038,7 +1044,7 @@ jobs:
     depends_on: []
   - name: baseline_WuKong_s42_mind
     kind: baseline
-    args: "--model WuKong {best:tune_baseline_WuKong_mind}"
+    args: "--model WuKong {best:tune_baseline_WuKong_mind} --vocab-from-history 0"
     seed: 42
     memory: light
     model: WuKong
@@ -1047,7 +1053,7 @@ jobs:
     depends_on: []
   - name: baseline_WuKong_s43_mind
     kind: baseline
-    args: "--model WuKong {best:tune_baseline_WuKong_mind}"
+    args: "--model WuKong {best:tune_baseline_WuKong_mind} --vocab-from-history 0"
     seed: 43
     memory: light
     model: WuKong
@@ -1057,7 +1063,7 @@ jobs:
     depends_on: []
   - name: baseline_WuKong_s44_mind
     kind: baseline
-    args: "--model WuKong {best:tune_baseline_WuKong_mind}"
+    args: "--model WuKong {best:tune_baseline_WuKong_mind} --vocab-from-history 0"
     seed: 44
     memory: light
     model: WuKong
@@ -1303,14 +1309,14 @@ jobs:
     depends_on: []
   - name: tune_baseline_TransAct_zhihurec
     kind: tune_baseline
-    args: "--model TransAct --trials 8 --seed 0"
+    args: "--model TransAct --trials 8 --seed 0 --vocab-from-history 0"
     memory: light
     group: tune_TransAct@zhihurec
     dataset: zhihurec
     depends_on: []
   - name: tune_baseline_WuKong_zhihurec
     kind: tune_baseline
-    args: "--model WuKong --trials 8 --seed 0"
+    args: "--model WuKong --trials 8 --seed 0 --vocab-from-history 0"
     memory: light
     group: tune_WuKong@zhihurec
     dataset: zhihurec
@@ -1487,7 +1493,7 @@ jobs:
   # ── zhihurec: Stage 1c baselines (seeds 43/44 optional: best baseline only) ──
   - name: baseline_TransAct_s42_zhihurec
     kind: baseline
-    args: "--model TransAct {best:tune_baseline_TransAct_zhihurec}"
+    args: "--model TransAct {best:tune_baseline_TransAct_zhihurec} --vocab-from-history 0"
     seed: 42
     memory: light
     model: TransAct
@@ -1496,7 +1502,7 @@ jobs:
     depends_on: []
   - name: baseline_TransAct_s43_zhihurec
     kind: baseline
-    args: "--model TransAct {best:tune_baseline_TransAct_zhihurec}"
+    args: "--model TransAct {best:tune_baseline_TransAct_zhihurec} --vocab-from-history 0"
     seed: 43
     memory: light
     model: TransAct
@@ -1506,7 +1512,7 @@ jobs:
     depends_on: []
   - name: baseline_TransAct_s44_zhihurec
     kind: baseline
-    args: "--model TransAct {best:tune_baseline_TransAct_zhihurec}"
+    args: "--model TransAct {best:tune_baseline_TransAct_zhihurec} --vocab-from-history 0"
     seed: 44
     memory: light
     model: TransAct
@@ -1516,7 +1522,7 @@ jobs:
     depends_on: []
   - name: baseline_WuKong_s42_zhihurec
     kind: baseline
-    args: "--model WuKong {best:tune_baseline_WuKong_zhihurec}"
+    args: "--model WuKong {best:tune_baseline_WuKong_zhihurec} --vocab-from-history 0"
     seed: 42
     memory: light
     model: WuKong
@@ -1525,7 +1531,7 @@ jobs:
     depends_on: []
   - name: baseline_WuKong_s43_zhihurec
     kind: baseline
-    args: "--model WuKong {best:tune_baseline_WuKong_zhihurec}"
+    args: "--model WuKong {best:tune_baseline_WuKong_zhihurec} --vocab-from-history 0"
     seed: 43
     memory: light
     model: WuKong
@@ -1535,7 +1541,7 @@ jobs:
     depends_on: []
   - name: baseline_WuKong_s44_zhihurec
     kind: baseline
-    args: "--model WuKong {best:tune_baseline_WuKong_zhihurec}"
+    args: "--model WuKong {best:tune_baseline_WuKong_zhihurec} --vocab-from-history 0"
     seed: 44
     memory: light
     model: WuKong

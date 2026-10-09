@@ -7,7 +7,9 @@ Every baseline gets the same declared space and the same trial budget.  Each
 trial is a separate train.py job (`<out>/trial_<i>/`, holdout excluded,
 early stopping on val with patience 2, max 20 epochs); selection is on val AUC
 only.  Writes `<out>/best.yaml` (model-config overrides for train.py --params)
-and `<out>/trials.json`.  Finished trials are skipped on rerun.
+and `<out>/trials.json`.  Finished trials are skipped on rerun, but only when they were
+built on the processed dataset this trial would use now (same dataset id, so e.g. trials from
+before the history-vocabulary fix, see train.py, are retrained, never silently reused).
 
 The spec's forced one-epoch variant is covered by early stopping: FuxiCTR
 evaluates val after every epoch and keeps the best one, so a trial whose best
@@ -18,9 +20,11 @@ records each trial's epoch-1 and best val AUC.
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import itertools
 import json
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -55,6 +59,34 @@ def _epoch_aucs(log: Path) -> list[float]:
     return [float(x) for x in re.findall(r"\[Metrics\].*?AUC: ([0-9.]+)", log.read_text())]
 
 
+def reusable_trial(metrics: dict, expected_dataset_id: str) -> bool:
+    """A finished trial counts only if it ran on the processed dataset this trial needs."""
+    return (metrics.get("params") or {}).get("dataset_id") == expected_dataset_id
+
+
+def set_aside_stale_trials(out: Path, expected: dict[int, str]) -> Path | None:
+    """
+    Move finished trials built on another processed dataset (e.g. before the history-vocabulary
+    fix), plus the trials.json/best.yaml selected from them, into <out>/superseded_<UTC time>/
+    so they are kept for reference but neither reused nor overwritten.
+    """
+    stale = []
+    for i, dataset_id in expected.items():
+        metrics = out / f"trial_{i:02d}" / "final_metrics.json"
+        if metrics.is_file() and not reusable_trial(json.loads(metrics.read_text()), dataset_id):
+            stale.append(metrics.parent)
+    if not stale:
+        return None
+    dest = out / f"superseded_{dt.datetime.now(dt.timezone.utc):%Y%m%dT%H%M%SZ}"
+    dest.mkdir(parents=True)
+    for path in [*stale, out / "trials.json", out / "best.yaml"]:
+        if path.exists():
+            shutil.move(str(path), str(dest / path.name))
+    print(f"[tune] {len(stale)} trial(s) ran on another processed dataset: moved to {dest}",
+          flush=True)
+    return dest
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--model", required=True)
@@ -66,12 +98,19 @@ def main() -> None:
     p.add_argument("--quiet", action="store_true")
     p.add_argument("--config-hash", default=None)
     p.add_argument("--dataset", default="kuairand")
+    p.add_argument("--vocab-from-history", type=int, choices=(0, 1), default=0,
+                   help="passed to train.py (0 = item vocabulary from the target-item column only)")
     args, _ = p.parse_known_args()
+    from train import resolve_dataset_params
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
+    trials = sample_trials(args.model, args.trials, args.seed)
+    set_aside_stale_trials(out, {
+        i: resolve_dataset_params(args.model, args.dataset, t, bool(args.vocab_from_history))["dataset_id"]
+        for i, t in enumerate(trials)})
     results = []
-    for i, trial in enumerate(sample_trials(args.model, args.trials, args.seed)):
+    for i, trial in enumerate(trials):
         tdir = out / f"trial_{i:02d}"
         tdir.mkdir(exist_ok=True)
         (tdir / "params.yaml").write_text(yaml.safe_dump(trial))
@@ -79,7 +118,8 @@ def main() -> None:
         if not metrics.exists():
             cmd = [sys.executable, str(ROOT / "train.py"), "--model", args.model,
                    "--run-dir", str(tdir), "--gpu", str(args.gpu), "--seed", "2024",
-                   "--params", str(tdir / "params.yaml"), "--dataset", args.dataset, "--quiet"]
+                   "--params", str(tdir / "params.yaml"), "--dataset", args.dataset,
+                   "--vocab-from-history", str(args.vocab_from_history), "--quiet"]
             if args.max_steps:
                 cmd += ["--max-steps", str(args.max_steps)]
             print(f"[tune] {args.model} trial {i}: {trial}", flush=True)
@@ -89,8 +129,8 @@ def main() -> None:
                 results.append({"trial": i, "params": trial, "val_auc": None, "failed": True})
                 continue
         m = json.loads(metrics.read_text())
-        aucs = _epoch_aucs(tdir / f"{args.model}.log") or _epoch_aucs(
-            next(iter(tdir.glob(f"*/{args.model}.log")), tdir / "missing"))
+        aucs = (_epoch_aucs(tdir / f"{args.model}.log")
+                or _epoch_aucs(tdir / m["params"]["dataset_id"] / f"{args.model}.log"))
         results.append({"trial": i, "params": trial, "val_auc": m["val"]["auc"],
                         "epoch1_val_auc": aucs[0] if aucs else None,
                         "best_epoch": int(np.argmax(aucs)) + 1 if aucs else None})

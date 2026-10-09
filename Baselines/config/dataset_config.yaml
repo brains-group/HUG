@@ -10,6 +10,13 @@
 #   kuairand_1k_seq    hist_video_ids as a raw sequence   → TransAct
 #   kuairand_1k        hist_video_ids mean-pooled         → WuKong
 #   kuairand_1k_noseq  no behaviour sequence              → FiGNN, DCNv2
+#
+# hist_video_ids shares video_id's embedding table.  train.py (unless --vocab-from-history 1)
+# gives it a per-column min_categr_count no token reaches, so the video_id vocabulary is fitted
+# on the video_id column alone: FuxiCTR would otherwise add every frequent history token to it,
+# and since histories hold only clicked videos, "video is in-vocab" would encode the label.
+# Those runs use processed-data dirs <dataset_id>_itemvocab_m<count>.  The *_noseq ids have no
+# history column and are unaffected.
 # ─────────────────────────────────────────────────────────────
 
 kuairand_1k_seq:

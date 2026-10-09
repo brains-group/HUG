@@ -680,3 +680,117 @@ class TestDatasetDimension:
                                           "fusion_misa")} <= groups
             tunes = [j for j in by_ds[ds] if j.kind in rq.TUNE_KINDS]
             assert all("--trials 8" in " ".join(j.args) or "--fusion" in " ".join(j.args) for j in tunes)
+
+
+# ── Baseline history vocabulary (label leak fix) ───────────────────────────────
+# hist_video_ids shares video_id's embedding.  FuxiCTR used to add frequent history tokens to
+# the video_id vocabulary; histories hold only clicked videos, so "target video is in-vocab"
+# encoded the label.  Baselines/train.py now keeps history tokens out of the item vocabulary.
+
+SEQ_MODELS = ("TransAct", "WuKong")
+
+
+def _baseline_modules():
+    pytest.importorskip("fuxictr")
+    sys.path.insert(0, str(REPO_ROOT / "Baselines"))
+    import train as baseline_train
+    spec = importlib.util.spec_from_file_location("baseline_tune", REPO_ROOT / "Baselines" / "tune.py")
+    tune = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tune)
+    return baseline_train, tune
+
+
+def _fit_toy_vocab(bt, params: dict, tmp_path: Path):
+    """Fit FuxiCTR's FeatureProcessor on a toy train.csv with the config's video/history columns."""
+    from fuxictr.preprocess import FeatureProcessor
+    rows = [("1", "", 0), ("2", "", 1), ("1", "2", 0), ("2", "2 999", 1), ("1", "999 999 2", 1)]
+    csv_path = tmp_path / "train.csv"
+    with open(csv_path, "w", newline="") as fh:
+        w = csv.writer(fh)
+        w.writerow(["video_id", "hist_video_ids", "is_click"])
+        w.writerows(rows)
+    cols = [c for c in params["feature_cols"] if c["name"] in ("video_id", "hist_video_ids")]
+    fp = FeatureProcessor(feature_cols=cols, label_col=params["label_col"],
+                          dataset_id=params["dataset_id"], data_root=str(tmp_path))
+    fp.fit(fp.preprocess(fp.read_data(str(csv_path), data_format="csv")), min_categr_count=1)
+    return fp
+
+
+class TestHistoryVocab:
+
+    @pytest.mark.parametrize("model", SEQ_MODELS)
+    @pytest.mark.parametrize("dataset", ["kuairand", "mind", "zhihurec"])
+    def test_seq_configs_keep_history_tokens_out_of_item_vocab(self, model, dataset, tmp_path):
+        bt, _ = _baseline_modules()
+        params = bt.resolve_dataset_params(model, dataset, {"min_categr_count": 1}, False)
+        assert params["dataset_id"].endswith(bt.ITEM_VOCAB_SUFFIX + "_m1")
+        hist = [c for c in params["feature_cols"] if c["name"] == "hist_video_ids"]
+        assert hist and hist[0]["share_embedding"] == "video_id"
+        assert hist[0]["min_categr_count"] == bt.HISTORY_VOCAB_MIN_COUNT   # survives the tuned global count
+        fp = _fit_toy_vocab(bt, params, tmp_path)
+        vocab = fp.processor_dict["video_id::tokenizer"].vocab
+        assert "999" not in vocab                      # appears only in histories
+        assert {"1", "2"} <= set(vocab)                # target-item column still fitted
+        hist_tok = fp.processor_dict["hist_video_ids::tokenizer"]
+        assert hist_tok.vocab is not None and "999" not in hist_tok.vocab
+        enc = hist_tok.encode_sequence(fp.preprocess(fp.read_data(
+            str(tmp_path / "train.csv"), data_format="csv")).collect().to_pandas()["hist_video_ids"])
+        assert enc[-1][-3:] == [vocab["__OOV__"], vocab["__OOV__"], vocab["2"]]
+
+    def test_legacy_flag_reproduces_the_leak(self, tmp_path):
+        bt, _ = _baseline_modules()
+        params = bt.resolve_dataset_params("WuKong", "kuairand", {"min_categr_count": 1}, True)
+        assert params["dataset_id"] == "kuairand_1k_m1"                  # old cache name
+        fp = _fit_toy_vocab(bt, params, tmp_path)
+        assert "999" in fp.processor_dict["video_id::tokenizer"].vocab
+
+    @pytest.mark.parametrize("model", ["FiGNN", "DCNv2"])
+    def test_noseq_configs_unchanged(self, model):
+        bt, _ = _baseline_modules()
+        for ds, base in (("kuairand", "kuairand_1k_noseq"), ("mind", "mind_noseq"),
+                         ("zhihurec", "zhihurec_noseq")):
+            for vfh in (False, True):
+                params = bt.resolve_dataset_params(model, ds, {"min_categr_count": 5}, vfh)
+                assert params["dataset_id"] == f"{base}_m5"
+                assert not any(c.get("type") == "sequence" for c in params["feature_cols"])
+
+    def test_tune_sets_aside_trials_from_another_processed_dataset(self, tmp_path):
+        _, tune = _baseline_modules()
+        out = tmp_path / "tune"
+        for i, ds_id in enumerate(["kuairand_1k_seq_m5", "kuairand_1k_seq_itemvocab_m2"]):
+            (out / f"trial_{i:02d}").mkdir(parents=True)
+            (out / f"trial_{i:02d}" / "final_metrics.json").write_text(
+                json.dumps({"params": {"dataset_id": ds_id}, "val": {"auc": 0.9}}))
+        (out / "best.yaml").write_text("min_categr_count: 5\n")
+        (out / "trials.json").write_text("[]")
+        dest = tune.set_aside_stale_trials(out, {0: "kuairand_1k_seq_itemvocab_m5",
+                                                 1: "kuairand_1k_seq_itemvocab_m2"})
+        assert dest is not None and (dest / "trial_00" / "final_metrics.json").is_file()
+        assert (dest / "best.yaml").is_file() and (dest / "trials.json").is_file()
+        assert not (out / "trial_00").exists() and not (out / "best.yaml").exists()
+        assert (out / "trial_01" / "final_metrics.json").is_file()      # matching trial kept
+        assert tune.set_aside_stale_trials(out, {1: "kuairand_1k_seq_itemvocab_m2"}) is None
+
+    def test_heavy_plan_reruns_exactly_the_seq_baselines(self, tmp_path):
+        """--vocab-from-history 0 on TransAct/WuKong jobs changes only their hashes."""
+        import copy
+        import yaml
+        raw = yaml.safe_load((REPO_ROOT / "experiments" / "heavy_run.yaml").read_text())
+        before = copy.deepcopy(raw)
+        flagged = set()
+        for j in before["jobs"]:
+            if "--vocab-from-history 0" in (j.get("args") or ""):
+                flagged.add(j["name"])
+                j["args"] = j["args"].replace(" --vocab-from-history 0", "")
+        fps = {"kuairand": "d-k", "mind": "d-m", "zhihurec": "d-z"}
+        new, old = (make_queue(tmp_path, None, p, data_fp=fps) for p in (raw, before))
+        changed = {n for n in new.jobs
+                   if new.compute_hash(new.jobs[n]) != old.compute_hash(old.jobs[n])}
+        seq = {n for n, j in new.plan.jobs.items()
+               if j.kind != "final_eval" and any(m in " ".join(j.args) for m in SEQ_MODELS)}
+        seq |= {n for n, j in new.plan.jobs.items() if j.kind == "final_eval" and j.of in seq}
+        assert flagged == {n for n in seq if new.plan.jobs[n].kind != "final_eval"}
+        assert len(seq) == 42 and changed == seq
+        for n in seq:
+            cmd = new._base_command(new.plan.jobs[n])
+            assert cmd[cmd.index("--vocab-from-history") + 1] == "0"
