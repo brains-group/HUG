@@ -794,3 +794,71 @@ class TestHistoryVocab:
         for n in seq:
             cmd = new._base_command(new.plan.jobs[n])
             assert cmd[cmd.index("--vocab-from-history") + 1] == "0"
+
+
+# ── Spec 05b decision: dense skip on for the sparse and misa heads ─────────────
+
+DENSE_SKIP_HEADS = ("sparse", "misa")
+
+
+def _fusion_head(job) -> str | None:
+    """Fusion head a plan job trains: --fusion X, or the tune_fusion_X job its best.yaml comes from."""
+    a = job.args
+    if "--fusion" in a:
+        return a[a.index("--fusion") + 1]
+    for ref in job.best_refs():
+        if ref.startswith("tune_fusion_"):
+            return ref[len("tune_fusion_"):].split("_")[0]
+    return None
+
+
+def test_heavy_plan_sparse_and_misa_jobs_carry_dense_skip(tmp_path):
+    plan = rq.load_plan(REPO_ROOT / "experiments" / "heavy_run.yaml")
+    heads = {n: _fusion_head(j) for n, j in plan.jobs.items() if j.kind != "final_eval"}
+    with_skip = {n for n, j in plan.jobs.items() if "--fusion-dense-skip" in j.args}
+    want = {n for n, h in heads.items() if h in DENSE_SKIP_HEADS}
+    assert with_skip == want
+    for ds in ("kuairand", "mind", "zhihurec"):                     # every dataset has both heads
+        assert {heads[n] for n in want if plan.jobs[n].dataset == ds} == set(DENSE_SKIP_HEADS)
+    assert {h for h in heads.values() if h} - set(DENSE_SKIP_HEADS) >= {"evgate"}   # others untouched
+    # final_evals inherit the flag through their stage-1 job's args
+    import yaml
+    raw = yaml.safe_load((REPO_ROOT / "experiments" / "heavy_run.yaml").read_text())
+    q = make_queue(tmp_path, None, raw, data_fp={"kuairand": "k", "mind": "m", "zhihurec": "z"})
+    for n, j in q.plan.jobs.items():
+        if j.kind == "final_eval":
+            assert ("--fusion-dense-skip" in q._base_command(j)) == (j.of in want)
+
+
+def test_tune_hug_fixes_dense_skip_in_every_trial_and_best_yaml(tmp_path, monkeypatch):
+    import yaml
+    sys.path.insert(0, str(REPO_ROOT / "Framework"))
+    import tune_hug
+    import main as hug_main
+    with pytest.raises(ValueError):
+        tune_hug.sample_trials("N4", 2, 0, "evgate", dense_skip=True)
+    launched = []
+
+    def fake_call(cmd, cwd=None):
+        run_dir = Path(cmd[cmd.index("--run-dir") + 1])
+        launched.append(cmd)
+        params = yaml.safe_load((run_dir / "params.yaml").read_text())
+        args = hug_main.parse_args(["--params", str(run_dir / "params.yaml")])
+        assert params["fusion_dense_skip"] is True and args.fusion_dense_skip is True
+        (run_dir / "final_metrics.json").write_text(json.dumps(
+            {"val": {"auc": 0.7 + 0.01 * len(launched)}, "best_epoch": 1}))
+        return 0
+
+    monkeypatch.setattr(tune_hug.subprocess, "call", fake_call)
+    base = tmp_path / "n4_best.yaml"
+    base.write_text("emb_dim: 32\n")
+    out = tmp_path / "tune_fusion_misa"
+    monkeypatch.setattr(sys, "argv", ["tune_hug.py", "--fusion", "misa", "--trials", "3", "--seed", "0",
+                                      "--params", str(base), "--out", str(out), "--fusion-dense-skip"])
+    tune_hug.main()
+    assert len(launched) == 3
+    assert all("--fusion-dense-skip" not in c for c in launched)    # carried by params.yaml, once
+    best = yaml.safe_load((out / "best.yaml").read_text())
+    assert best["fusion_dense_skip"] is True and best["fusion"] == "misa" and best["emb_dim"] == 32
+    # without the flag the trials don't get it
+    assert all("fusion_dense_skip" not in t for t in tune_hug.sample_trials("N4", 3, 0, "sparse"))

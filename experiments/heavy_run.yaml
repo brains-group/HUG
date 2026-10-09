@@ -25,6 +25,10 @@
 # was in-vocab essentially iff it had been clicked; see Baselines/train.py).  The explicit flag
 # also gives these jobs new config hashes, so exactly they rerun; jobs from before the fix
 # (dataset ids without "_itemvocab") are superseded.
+#
+# Every sparse/misa fusion job carries "--fusion-dense-skip" (spec 05b decision: the head also
+# sees the dense projections p_G, p_S).  tune_hug.py writes it into every trial's params.yaml and
+# hence best.yaml; the downstream hug jobs repeat it explicitly.
 
 defaults:
   data_dir: KuaiRand-1K/data
@@ -476,7 +480,7 @@ jobs:
   # private k of hug_sparse_s42 ({run:...} expands to that job's run directory).
   - name: tune_fusion_sparse
     kind: tune_hug
-    args: "--fusion sparse --trials 12 --seed 0 {best:tune_hug_N4}"
+    args: "--fusion sparse --trials 12 --seed 0 {best:tune_hug_N4} --fusion-dense-skip"
     memory: heavy
     group: tune_fusion_sparse
     depends_on: []
@@ -500,13 +504,13 @@ jobs:
     depends_on: []
   - name: tune_fusion_misa
     kind: tune_hug
-    args: "--fusion misa --trials 8 --seed 0 {best:tune_hug_N4}"
+    args: "--fusion misa --trials 8 --seed 0 {best:tune_hug_N4} --fusion-dense-skip"
     memory: heavy
     group: tune_fusion_misa
     depends_on: []
   - name: hug_sparse_s42
     kind: hug
-    args: "{best:tune_fusion_sparse}"
+    args: "{best:tune_fusion_sparse} --fusion-dense-skip"
     seed: 42
     memory: heavy
     model: HUG
@@ -515,7 +519,7 @@ jobs:
     depends_on: []
   - name: hug_sparse_s43
     kind: hug
-    args: "{best:tune_fusion_sparse}"
+    args: "{best:tune_fusion_sparse} --fusion-dense-skip"
     seed: 43
     memory: heavy
     model: HUG
@@ -524,7 +528,7 @@ jobs:
     depends_on: []
   - name: hug_sparse_s44
     kind: hug
-    args: "{best:tune_fusion_sparse}"
+    args: "{best:tune_fusion_sparse} --fusion-dense-skip"
     seed: 44
     memory: heavy
     model: HUG
@@ -614,7 +618,7 @@ jobs:
     depends_on: []
   - name: hug_misa_s42
     kind: hug
-    args: "{best:tune_fusion_misa}"
+    args: "{best:tune_fusion_misa} --fusion-dense-skip"
     seed: 42
     memory: heavy
     model: HUG
@@ -623,7 +627,7 @@ jobs:
     depends_on: []
   - name: hug_misa_s43
     kind: hug
-    args: "{best:tune_fusion_misa}"
+    args: "{best:tune_fusion_misa} --fusion-dense-skip"
     seed: 43
     memory: heavy
     model: HUG
@@ -632,7 +636,7 @@ jobs:
     depends_on: []
   - name: hug_misa_s44
     kind: hug
-    args: "{best:tune_fusion_misa}"
+    args: "{best:tune_fusion_misa} --fusion-dense-skip"
     seed: 44
     memory: heavy
     model: HUG
@@ -641,7 +645,7 @@ jobs:
     depends_on: []
   - name: hug_sparsefixed_s42
     kind: hug
-    args: "{best:tune_fusion_sparse} --k-schedule fixed --k-private-fixed-from {run:hug_sparse_s42}"
+    args: "{best:tune_fusion_sparse} --k-schedule fixed --k-private-fixed-from {run:hug_sparse_s42} --fusion-dense-skip"
     seed: 42
     memory: heavy
     model: HUG
@@ -650,7 +654,7 @@ jobs:
     depends_on: []
   - name: hug_sparsefixed_s43
     kind: hug
-    args: "{best:tune_fusion_sparse} --k-schedule fixed --k-private-fixed-from {run:hug_sparse_s42}"
+    args: "{best:tune_fusion_sparse} --k-schedule fixed --k-private-fixed-from {run:hug_sparse_s42} --fusion-dense-skip"
     seed: 43
     memory: heavy
     model: HUG
@@ -659,7 +663,7 @@ jobs:
     depends_on: []
   - name: hug_sparsefixed_s44
     kind: hug
-    args: "{best:tune_fusion_sparse} --k-schedule fixed --k-private-fixed-from {run:hug_sparse_s42}"
+    args: "{best:tune_fusion_sparse} --k-schedule fixed --k-private-fixed-from {run:hug_sparse_s42} --fusion-dense-skip"
     seed: 44
     memory: heavy
     model: HUG
@@ -668,7 +672,7 @@ jobs:
     depends_on: []
   - name: hug_sparse_noalign_s42
     kind: hug
-    args: "{best:tune_fusion_sparse} --w-align 0"
+    args: "{best:tune_fusion_sparse} --w-align 0 --fusion-dense-skip"
     seed: 42
     memory: heavy
     model: HUG
@@ -677,7 +681,7 @@ jobs:
     depends_on: []
   - name: hug_sparse_nodec_s42
     kind: hug
-    args: "{best:tune_fusion_sparse} --w-dec 0"
+    args: "{best:tune_fusion_sparse} --w-dec 0 --fusion-dense-skip"
     seed: 42
     memory: heavy
     model: HUG
@@ -686,7 +690,7 @@ jobs:
     depends_on: []
   - name: hug_sparse_norec_s42
     kind: hug
-    args: "{best:tune_fusion_sparse} --w-rec 0"
+    args: "{best:tune_fusion_sparse} --w-rec 0 --fusion-dense-skip"
     seed: 42
     memory: heavy
     model: HUG
@@ -860,7 +864,7 @@ jobs:
     depends_on: []
   - name: tune_fusion_sparse_mind
     kind: tune_hug
-    args: "--fusion sparse --trials 8 --seed 0 {best:tune_hug_N4_mind}"
+    args: "--fusion sparse --trials 8 --seed 0 {best:tune_hug_N4_mind} --fusion-dense-skip"
     memory: heavy
     group: tune_fusion_sparse@mind
     dataset: mind
@@ -874,7 +878,7 @@ jobs:
     depends_on: []
   - name: tune_fusion_misa_mind
     kind: tune_hug
-    args: "--fusion misa --trials 8 --seed 0 {best:tune_hug_N4_mind}"
+    args: "--fusion misa --trials 8 --seed 0 {best:tune_hug_N4_mind} --fusion-dense-skip"
     memory: heavy
     group: tune_fusion_misa@mind
     dataset: mind
@@ -963,7 +967,7 @@ jobs:
     depends_on: []
   - name: hug_sparse_s42_mind
     kind: hug
-    args: "{best:tune_fusion_sparse_mind}"
+    args: "{best:tune_fusion_sparse_mind} --fusion-dense-skip"
     seed: 42
     memory: heavy
     model: HUG
@@ -973,7 +977,7 @@ jobs:
     depends_on: []
   - name: hug_sparse_s43_mind
     kind: hug
-    args: "{best:tune_fusion_sparse_mind}"
+    args: "{best:tune_fusion_sparse_mind} --fusion-dense-skip"
     seed: 43
     memory: heavy
     model: HUG
@@ -983,7 +987,7 @@ jobs:
     depends_on: []
   - name: hug_sparse_s44_mind
     kind: hug
-    args: "{best:tune_fusion_sparse_mind}"
+    args: "{best:tune_fusion_sparse_mind} --fusion-dense-skip"
     seed: 44
     memory: heavy
     model: HUG
@@ -1003,7 +1007,7 @@ jobs:
     depends_on: []
   - name: hug_misa_s42_mind
     kind: hug
-    args: "{best:tune_fusion_misa_mind}"
+    args: "{best:tune_fusion_misa_mind} --fusion-dense-skip"
     seed: 42
     memory: heavy
     model: HUG
@@ -1338,7 +1342,7 @@ jobs:
     depends_on: []
   - name: tune_fusion_sparse_zhihurec
     kind: tune_hug
-    args: "--fusion sparse --trials 8 --seed 0 {best:tune_hug_N4_zhihurec}"
+    args: "--fusion sparse --trials 8 --seed 0 {best:tune_hug_N4_zhihurec} --fusion-dense-skip"
     memory: heavy
     group: tune_fusion_sparse@zhihurec
     dataset: zhihurec
@@ -1352,7 +1356,7 @@ jobs:
     depends_on: []
   - name: tune_fusion_misa_zhihurec
     kind: tune_hug
-    args: "--fusion misa --trials 8 --seed 0 {best:tune_hug_N4_zhihurec}"
+    args: "--fusion misa --trials 8 --seed 0 {best:tune_hug_N4_zhihurec} --fusion-dense-skip"
     memory: heavy
     group: tune_fusion_misa@zhihurec
     dataset: zhihurec
@@ -1441,7 +1445,7 @@ jobs:
     depends_on: []
   - name: hug_sparse_s42_zhihurec
     kind: hug
-    args: "{best:tune_fusion_sparse_zhihurec}"
+    args: "{best:tune_fusion_sparse_zhihurec} --fusion-dense-skip"
     seed: 42
     memory: heavy
     model: HUG
@@ -1451,7 +1455,7 @@ jobs:
     depends_on: []
   - name: hug_sparse_s43_zhihurec
     kind: hug
-    args: "{best:tune_fusion_sparse_zhihurec}"
+    args: "{best:tune_fusion_sparse_zhihurec} --fusion-dense-skip"
     seed: 43
     memory: heavy
     model: HUG
@@ -1461,7 +1465,7 @@ jobs:
     depends_on: []
   - name: hug_sparse_s44_zhihurec
     kind: hug
-    args: "{best:tune_fusion_sparse_zhihurec}"
+    args: "{best:tune_fusion_sparse_zhihurec} --fusion-dense-skip"
     seed: 44
     memory: heavy
     model: HUG
@@ -1481,7 +1485,7 @@ jobs:
     depends_on: []
   - name: hug_misa_s42_zhihurec
     kind: hug
-    args: "{best:tune_fusion_misa_zhihurec}"
+    args: "{best:tune_fusion_misa_zhihurec} --fusion-dense-skip"
     seed: 42
     memory: heavy
     model: HUG

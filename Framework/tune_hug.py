@@ -12,6 +12,9 @@ Finished trials are skipped on rerun.
 Fusion tuning (spec 05 F): `--fusion X --params <N4 best.yaml>` keeps the N4
 encoder settings fixed and searches only X's fusion space; every trial's
 params (and best.yaml) are the N4 settings merged with the fusion trial.
+`--fusion-dense-skip` (sparse/misa only, spec 05b §3) is a fixed setting, not a tuned one: it
+is written into every trial's params.yaml, so best.yaml carries it to downstream
+`{best:...}` runs.
 """
 
 from __future__ import annotations
@@ -65,16 +68,24 @@ def _expand(trial: dict) -> dict:
     return out
 
 
-def sample_trials(arm: str, n: int, seed: int, fusion: str | None = None) -> list[dict]:
+DENSE_SKIP_FUSIONS = ("sparse", "misa")       # heads with a dense skip path (spec 05b §3)
+
+
+def sample_trials(arm: str, n: int, seed: int, fusion: str | None = None,
+                  dense_skip: bool = False) -> list[dict]:
     space = FUSION_SPACES[fusion] if fusion else {k: v for k, v in SPACE.items()
                                                   if arm != "N1" or k not in GRAPH_KEYS}
     keys = list(space)
     grid = list(itertools.product(*(space[k] for k in keys)))
     pick = np.random.default_rng(seed).choice(len(grid), size=min(n, len(grid)), replace=False)
     trials = [_expand(dict(zip(keys, grid[i]))) for i in pick]
+    if dense_skip and fusion not in DENSE_SKIP_FUSIONS:
+        raise ValueError(f"--fusion-dense-skip applies to {DENSE_SKIP_FUSIONS}, not {fusion!r}")
     if fusion:
         for t in trials:
             t["fusion"] = fusion
+            if dense_skip:
+                t["fusion_dense_skip"] = True        # fixed for every trial, not searched
     return trials
 
 
@@ -83,6 +94,8 @@ def main() -> None:
     p.add_argument("--arm", choices=sorted(ARM_FLAGS), default="N4")
     p.add_argument("--fusion", choices=sorted(FUSION_SPACES), default=None,
                    help="tune this fusion head on top of --params (N4 settings)")
+    p.add_argument("--fusion-dense-skip", action="store_true",
+                   help="sparse/misa: fixed dense skip path in every trial (recorded in best.yaml)")
     p.add_argument("--params", default=None, help="base settings merged into every trial")
     p.add_argument("--trials", type=int, default=16)
     p.add_argument("--seed", type=int, default=0, help="search seed (trials train with seed 42)")
@@ -97,7 +110,8 @@ def main() -> None:
     out.mkdir(parents=True, exist_ok=True)
     base = yaml.safe_load(Path(args.params).read_text()) if args.params else {}
     results = []
-    for i, trial in enumerate(sample_trials(args.arm, args.trials, args.seed, args.fusion)):
+    for i, trial in enumerate(sample_trials(args.arm, args.trials, args.seed, args.fusion,
+                                                 args.fusion_dense_skip)):
         trial = {**(base or {}), **trial}
         tdir = out / f"trial_{i:02d}"
         tdir.mkdir(exist_ok=True)
